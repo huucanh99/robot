@@ -89,6 +89,10 @@ class="full-input"
 v-model="form.name"
 />
 
+<div class="error" v-if="nameError">
+{{nameError}}
+</div>
+
 </div>
 
 
@@ -242,6 +246,8 @@ wait:3.5
 
 editingId:null,
 
+nameError:"",
+
 form:{
 name:"",
 speed:"",
@@ -261,6 +267,7 @@ methods:{
 createRecipe(){
 
 this.editingId=null
+this.nameError=""
 
 this.form={
 name:"",
@@ -276,6 +283,7 @@ wait:""
 editRecipe(recipe){
 
 this.editingId=recipe.id
+this.nameError=""
 
 this.form=JSON.parse(JSON.stringify(recipe))
 
@@ -286,11 +294,26 @@ saveEdit(){
 
 if(!this.editingId) return
 
+this.nameError=""
+
+const duplicated=this.recipes.find(
+r=>r.name===this.form.name && r.id!==this.editingId
+)
+
+if(duplicated){
+
+this.nameError="配方名稱重複"
+return
+
+}
+
 const index=this.recipes.findIndex(r=>r.id===this.editingId)
 
 this.recipes[index]={
+
 ...this.form,
 id:this.editingId
+
 }
 
 alert("修改成功")
@@ -300,7 +323,23 @@ alert("修改成功")
 
 cancelEdit(){
 
+const hasData=
+this.form.name ||
+this.form.speed ||
+this.form.grip ||
+this.form.open ||
+this.form.wait
+
+if(hasData){
+
+const ok=confirm("確定取消嗎？資料會全部消失")
+
+if(!ok) return
+
+}
+
 this.editingId=null
+this.nameError=""
 
 this.form={
 name:"",
@@ -315,9 +354,24 @@ wait:""
 
 saveAsNew(){
 
+this.nameError=""
+
+const duplicated=this.recipes.find(
+r=>r.name===this.form.name
+)
+
+if(duplicated){
+
+this.nameError="配方名稱重複"
+return
+
+}
+
 const newRecipe={
+
 ...this.form,
 id:Date.now()
+
 }
 
 this.recipes.push(newRecipe)
@@ -346,12 +400,6 @@ this.cancelEdit()
 
 
 <style scoped>
-
-.recipe-page{
-}
-
-
-/* HEADER */
 
 .page-header{
 display: flex;
@@ -457,7 +505,6 @@ padding:3px 10px;
 margin: -4px 0px;
 }
 
-
 .editor-body{
 padding:20px;
 flex:1;
@@ -490,29 +537,29 @@ position:relative;
 }
 
 .input-box input{
-
 width:90%;
 padding:12px 60px 12px 12px;
-
 border:1px solid #cfd6df;
 background:#f4f6f9;
-
 }
 
 .unit{
-
 position:absolute;
-
 right:15px;
 top:50%;
-
 transform:translateY(-50%);
-
 color:#666;
 font-size:14px;
-
 pointer-events:none;
+}
 
+
+/* ERROR */
+
+.error{
+color:#e53935;
+font-size:12px;
+margin-top:5px;
 }
 
 
