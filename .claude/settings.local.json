@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pdftotext \"D:/RobotArm/file/Programming-Language-TMscript_2.22_Rev1.0_EN.pdf\" -)",
+      "Bash(npm run:*)",
+      "Bash(git log:*)",
+      "Bash(python3 -c ':*)",
+      "Bash(python -c ':*)",
+      "Bash(python3:*)",
+      "Bash(npm install:*)",
+      "Bash(node -e ':*)",
+      "Bash(ipconfig)",
+      "Bash(chcp:*)"
+    ]
+  }
+}

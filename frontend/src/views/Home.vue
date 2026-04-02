@@ -53,13 +53,13 @@
 
             <div class="coordinates">
 
-              <div class="coord"><label>X:</label><input value="0.000"></div>
-              <div class="coord"><label>Y:</label><input value="0.000"></div>
-              <div class="coord"><label>Z:</label><input value="0.000"></div>
+              <div class="coord"><label>X:</label><input :value="pos.x" readonly></div>
+              <div class="coord"><label>Y:</label><input :value="pos.y" readonly></div>
+              <div class="coord"><label>Z:</label><input :value="pos.z" readonly></div>
 
-              <div class="coord"><label>J1:</label><input value="0.000"></div>
-              <div class="coord"><label>J2:</label><input value="0.000"></div>
-              <div class="coord"><label>J3:</label><input value="0.000"></div>
+              <div class="coord"><label>Rx:</label><input :value="pos.rx" readonly></div>
+              <div class="coord"><label>Ry:</label><input :value="pos.ry" readonly></div>
+              <div class="coord"><label>Rz:</label><input :value="pos.rz" readonly></div>
 
             </div>
 
@@ -69,6 +69,19 @@
                 <input type="checkbox" v-model="selectMode">
                 <span class="slider"></span>
               </label>
+            </div>
+
+            <!-- GRIPPER INDICATOR -->
+            <div class="gripper-indicator" :class="gripperOpen ? 'g-open' : 'g-closed'">
+              <div class="gripper-vis">
+                <div class="g-jaw g-left" :class="{ open: gripperOpen }"></div>
+                <div class="g-jaw g-right" :class="{ open: gripperOpen }"></div>
+              </div>
+              <div class="gripper-info">
+                <span class="gripper-label">夾爪</span>
+                <span class="gripper-state">{{ gripperOpen ? '開啟' : '閉合' }}</span>
+                <span v-if="countdown > 0" class="gripper-countdown">{{ countdown }}s</span>
+              </div>
             </div>
 
           </div>
@@ -93,7 +106,7 @@
                     v-for="n in 20"
                     :key="'tray1-'+n"
                     class="tray-cell"
-                    :class="{active: orders.tray1[n]}"
+                    :class="cellClass('tray1', n)"
                     @click="toggleCell('tray1',n)"
                   >
                     <span v-if="orders.tray1[n]" class="order-number">
@@ -116,7 +129,7 @@
                     v-for="n in 20"
                     :key="'tray4-'+n"
                     class="tray-cell"
-                    :class="{active: orders.tray4[n]}"
+                    :class="cellClass('tray4', n)"
                     @click="toggleCell('tray4',n)"
                   >
                     <span v-if="orders.tray4[n]" class="order-number">
@@ -133,7 +146,7 @@
                     v-for="n in 20"
                     :key="'tray2-'+n"
                     class="tray-cell"
-                    :class="{active: orders.tray2[n]}"
+                    :class="cellClass('tray2', n)"
                     @click="toggleCell('tray2',n)"
                   >
                     <span v-if="orders.tray2[n]" class="order-number">
@@ -156,7 +169,7 @@
                     v-for="n in 20"
                     :key="'tray6-'+n"
                     class="tray-cell"
-                    :class="{active: orders.tray6[n]}"
+                    :class="cellClass('tray6', n)"
                     @click="toggleCell('tray6',n)"
                   >
                     <span v-if="orders.tray6[n]" class="order-number">
@@ -173,7 +186,7 @@
                     v-for="n in 20"
                     :key="'tray5-'+n"
                     class="tray-cell"
-                    :class="{active: orders.tray5[n]}"
+                    :class="cellClass('tray5', n)"
                     @click="toggleCell('tray5',n)"
                   >
                     <span v-if="orders.tray5[n]" class="order-number">
@@ -190,7 +203,7 @@
                     v-for="n in 20"
                     :key="'tray3-'+n"
                     class="tray-cell"
-                    :class="{active: orders.tray3[n]}"
+                    :class="cellClass('tray3', n)"
                     @click="toggleCell('tray3',n)"
                   >
                     <span v-if="orders.tray3[n]" class="order-number">
@@ -220,12 +233,18 @@
 
           <div class="camera-view">
 
-            <!-- vertical -->
-            <div class="line v1"></div>
+            <div v-if="capturing" class="scan-progress">
+              取樣中... {{ capturedImages.filter(x => x).length }} / 6
+            </div>
 
-            <!-- horizontal -->
-            <div class="line h1"></div>
-            <div class="line h2"></div>
+            <div class="image-grid">
+              <div v-for="i in 6" :key="i" class="image-slot">
+                <img v-if="capturedImages[i-1]" :src="capturedImages[i-1]" class="slot-img" />
+                <div v-else class="slot-empty">
+                  <span>{{ i }}</span>
+                </div>
+              </div>
+            </div>
 
           </div>
 
@@ -235,7 +254,7 @@
         <!-- CONTROL BUTTONS -->
         <div class="controls">
 
-          <button class="btn sample">取樣</button>
+          <button class="btn sample" @click="captureImage" :disabled="capturing">取樣</button>
 
           <button class="btn start" @click="startRun">開始</button>
 
@@ -269,27 +288,55 @@
 
 
 <script>
-// Tọa độ gốc mỗi tray (dummy — điều chỉnh sau)
+// Tọa độ gốc mỗi tray — TM5-700, gripper hướng xuống
+// Cột trái (tray1-3): x=200, cột phải (tray4-6): x=350
+// Y trải 150-410mm, Z=200mm — tất cả trong vùng làm việc 700mm
 const TRAY_BASE = {
-  tray1: { x: 200, y:   0 },
-  tray2: { x: 200, y: 200 },
-  tray3: { x: 200, y: 400 },
-  tray4: { x: 400, y: 100 },
-  tray5: { x: 400, y: 300 },
-  tray6: { x: 400, y: 500 },
+  tray1: { x: 200, y: 150 },
+  tray2: { x: 200, y: 280 },
+  tray3: { x: 200, y: 410 },
+  tray4: { x: 350, y: 150 },
+  tray5: { x: 350, y: 280 },
+  tray6: { x: 350, y: 410 },
 }
-const CELL_SPACING = 25   // mm
-const FIXED_Z      = 300
+const CELL_SPACING_X = 20  // mm — khoảng cách giữa các ô theo chiều X
+const CELL_SPACING_Y = 20  // mm — khoảng cách giữa các ô theo chiều Y
+const FIXED_Z      = 200
 const FIXED_RX     = 180
 const FIXED_RY     = 0
-const FIXED_RZ     = 90
+const FIXED_RZ     = 0
+
+// ─── POSITIONS — chỉnh x,y,z,rx,ry,rz theo thực tế ──────────────────────────
+//
+//  POS_INSPECT   vị trí đặt vật xuống để máy khác kiểm tra
+//  POS_STANDBY   vị trí robot đứng chờ (tránh va chạm khi máy kia kiểm tra)
+//  LOWER_MM      số mm robot hạ thêm khi gắp / thả (áp dụng cho tất cả điểm)
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+const POS_INSPECT = { label: "inspect", x: 275, y:   0, z: 400, rx: 180, ry: 0, rz: 0 }
+const POS_STANDBY = { label: "standby", x:   0, y: 300, z: 500, rx: 180, ry: 0, rz: 0 }
+const LOWER_MM    = 80
+
+function lower(pt) { return { ...pt, z: pt.z - LOWER_MM, label: pt.label + '-down' } }
+function lift(pt)  { return { ...pt,                      label: pt.label + '-up'   } }
+
+// ─── SCAN POSITIONS — 6 vị trí robot di chuyển đến để chụp ảnh ───────────────
+const POS_SCAN_1 = { label: "scan-1", x: 200, y: 150, z: 300, rx: 180, ry: 0, rz: 0 }
+const POS_SCAN_2 = { label: "scan-2", x: 200, y: 280, z: 300, rx: 180, ry: 0, rz: 0 }
+const POS_SCAN_3 = { label: "scan-3", x: 200, y: 410, z: 300, rx: 180, ry: 0, rz: 0 }
+const POS_SCAN_4 = { label: "scan-4", x: 350, y: 150, z: 300, rx: 180, ry: 0, rz: 0 }
+const POS_SCAN_5 = { label: "scan-5", x: 350, y: 280, z: 300, rx: 180, ry: 0, rz: 0 }
+const POS_SCAN_6 = { label: "scan-6", x: 350, y: 410, z: 300, rx: 180, ry: 0, rz: 0 }
+
+const SCAN_POSITIONS = [ POS_SCAN_1, POS_SCAN_2, POS_SCAN_3, POS_SCAN_4, POS_SCAN_5, POS_SCAN_6 ]
 
 function getCellCoords(tray, cell) {
   const base = TRAY_BASE[tray]
   const n    = parseInt(cell) - 1
   return {
-    x:  base.x + (n % 4) * CELL_SPACING,
-    y:  base.y + Math.floor(n / 4) * CELL_SPACING,
+    x:  base.x + (n % 4) * CELL_SPACING_X,
+    y:  base.y + Math.floor(n / 4) * CELL_SPACING_Y,
     z:  FIXED_Z,
     rx: FIXED_RX,
     ry: FIXED_RY,
@@ -302,7 +349,7 @@ export default {
 data(){
   return {
     recipes: [],
-    robotIP: "192.168.5.1",
+    robotIP: "",
     isConnected: false,
     selectMode: false,
     currentOrder: 1,
@@ -310,7 +357,15 @@ data(){
     orders: {
       tray1:{}, tray2:{}, tray3:{},
       tray4:{}, tray5:{}, tray6:{}
-    }
+    },
+    pos: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
+    posTimer: null,
+    runningLabel: null,
+    doneLabels: [],
+    capturedImages: Array(6).fill(null),
+    capturing: false,
+    gripperOpen: true,
+    countdown: 0,
   }
 },
 
@@ -340,6 +395,40 @@ methods:{
       if(data.success){
         this.isConnected = !this.isConnected
         this.log(this.isConnected ? `已連線 ${this.robotIP}` : "已斷線", this.isConnected ? "ok" : "info")
+        if(this.isConnected){
+          // Try camera connection and report status
+          fetch(`http://localhost:3000/camera/status`)
+            .then(r => r.json())
+            .then(d => {
+              if(d.isCameraConnected)
+                this.log(`相機已連線 ${this.robotIP}:15567`, "ok")
+              else if(d.serverReachable)
+                this.log(`已連線到 EIH Camera API (${this.robotIP}:15567)，等待相機初始化`, "info")
+              else
+                this.log(`無法連線到相機 API：${d.connection_message || '請確認 EIH Camera API 已啟用'}`, "error")
+            })
+            .catch(e => this.log(`相機連線失敗：${e.message}`, "error"))
+
+          this.posTimer = setInterval(async () => {
+            try {
+              const r    = await fetch("http://localhost:3000/robot/position")
+              const data = await r.json()
+              this.pos = data
+
+              const newDone = (data.doneLabels || []).filter(l => !this.doneLabels.includes(l))
+              newDone.forEach(l => this.log(`✓ 完成 ${l}`, "ok"))
+
+              if(data.currentLabel && data.currentLabel !== this.runningLabel)
+                this.log(`▶ 移動到 ${data.currentLabel}`, "info")
+
+              this.runningLabel = data.currentLabel
+              this.doneLabels   = data.doneLabels || []
+            } catch(_){}
+          }, 300)
+        } else {
+          clearInterval(this.posTimer)
+          this.pos = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 }
+        }
       } else {
         this.log(`連線失敗：${data.error}`, "error")
       }
@@ -349,46 +438,96 @@ methods:{
   },
 
   async startRun(){
-    // 收集所有已選格，依 order 排序
     let allSelected = []
     for(const trayName in this.orders){
       for(const cellIndex in this.orders[trayName]){
-        allSelected.push({
-          tray: trayName,
-          cell: cellIndex,
-          order: this.orders[trayName][cellIndex]
-        })
+        allSelected.push({ tray: trayName, cell: cellIndex, order: this.orders[trayName][cellIndex] })
       }
     }
-    if(allSelected.length === 0){
-      this.log("請先開啟 Toggle 並選取格子", "error")
-      return
-    }
+    if(allSelected.length === 0){ this.log("請先開啟 Toggle 並選取格子", "error"); return }
     allSelected.sort((a, b) => a.order - b.order)
 
-    // 對應座標
-    const points = allSelected.map(item => ({
-      label: `${item.tray}-${item.cell}`,
-      ...getCellCoords(item.tray, item.cell)
-    }))
+    this.runningLabel = null
+    this.doneLabels   = []
+    this.gripperOpen  = true
+    this.log(`開始執行 ${allSelected.length} 個點位...`, "info")
 
-    this.log(`開始執行 ${points.length} 個點位...`, "info")
+    for(const item of allSelected){
+      const cell = { label: `${item.tray}-${item.cell}`, ...getCellCoords(item.tray, item.cell) }
+
+      // 1. Tiếp cận cell → hạ xuống → gắp → nâng lên
+      this.log(`▶ 移動到 ${cell.label}`, "info")
+      if(!await this.moveOne(cell)) return
+      if(!await this.moveOne(lower(cell))) return
+      this.gripperOpen = false
+      this.log("夾爪閉合 — 取件", "info")
+      await this.sleep(300)
+      if(!await this.moveOne(lift(cell))) return
+
+      // 2. Di chuyển đến inspect → hạ xuống → thả → nâng lên
+      this.log("▶ 移動到檢測站", "info")
+      if(!await this.moveOne(POS_INSPECT)) return
+      if(!await this.moveOne(lower(POS_INSPECT))) return
+      this.gripperOpen = true
+      this.log("夾爪開啟 — 放件", "info")
+      await this.sleep(300)
+      if(!await this.moveOne(lift(POS_INSPECT))) return
+
+      // 3. Lui về standby — đứng chờ máy khác kiểm tra
+      this.log("▶ 移動到待機位置", "info")
+      if(!await this.moveOne(POS_STANDBY)) return
+
+      // 4. Đợi 15s đếm ngược
+      this.log("等待檢測 15 秒...", "info")
+      for(let t = 15; t > 0; t--){
+        this.countdown = t
+        await this.sleep(1000)
+      }
+      this.countdown = 0
+
+      // 5. Quay lại inspect → hạ xuống → gắp lại → nâng lên
+      this.log("▶ 返回檢測站取件", "info")
+      if(!await this.moveOne(POS_INSPECT)) return
+      if(!await this.moveOne(lower(POS_INSPECT))) return
+      this.gripperOpen = false
+      this.log("夾爪閉合 — 取回", "info")
+      await this.sleep(300)
+      if(!await this.moveOne(lift(POS_INSPECT))) return
+
+      // 5. Trả về tray cell → hạ xuống → thả → nâng lên
+      this.log(`▶ 返回 ${cell.label}`, "info")
+      if(!await this.moveOne(cell)) return
+      if(!await this.moveOne(lower(cell))) return
+      this.gripperOpen = true
+      this.log("夾爪開啟 — 放件", "info")
+      await this.sleep(300)
+      if(!await this.moveOne(lift(cell))) return
+      this.doneLabels.push(cell.label)
+      this.log(`✓ ${cell.label} 完成`, "ok")
+    }
+
+    this.log("✓ 全部執行完畢", "ok")
+    for(const t in this.orders) this.orders[t] = {}
+    this.currentOrder = 1
+  },
+
+  async moveOne(point){
     try {
-      const res = await fetch("http://localhost:3000/robot/run", {
+      const res  = await fetch("http://localhost:3000/robot/move-one", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ points, speed: 30 })
+        body: JSON.stringify({ point, speed: 30 })
       })
       const data = await res.json()
-      if(data.success){
-        this.log("✓ 執行完畢", "ok")
-      } else {
-        this.log(`執行失敗：${data.error}`, "error")
-      }
-    } catch(e) {
-      this.log(`執行失敗：${e.message}`, "error")
+      if(!data.success){ this.log(`移動失敗：${data.error}`, "error"); return false }
+      return true
+    } catch(e){
+      this.log(`移動失敗：${e.message}`, "error")
+      return false
     }
   },
+
+  sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)) },
 
   pauseRun(){
     this.log("暫停（尚未實作）", "info")
@@ -414,6 +553,14 @@ methods:{
     }
   },
 
+  cellClass(tray, n){
+    const label = `${tray}-${n}`
+    if(this.runningLabel === label) return { active: true, running: true }
+    if(this.doneLabels.includes(label))  return { active: true, done: true }
+    if(this.orders[tray][n])             return { active: true }
+    return {}
+  },
+
   recalculateOrders(){
     let allSelected = []
     for(const trayName in this.orders){
@@ -428,6 +575,41 @@ methods:{
       this.orders[item.tray][item.cell] = this.currentOrder
       this.currentOrder++
     })
+  },
+
+  async captureImage(){
+    if(this.capturing) return
+    if(!this.isConnected){ this.log("請先連線機器手臂", "error"); return }
+    this.capturing = true
+    this.capturedImages = Array(6).fill(null)
+    this.log("開始取樣，移動到 6 個位置...", "info")
+
+    for(let i = 0; i < SCAN_POSITIONS.length; i++){
+      if(!this.capturing) break
+      const pt = SCAN_POSITIONS[i]
+      this.log(`移動到 ${pt.label}...`, "info")
+      try {
+        const res = await fetch("http://localhost:3000/camera/move-and-capture", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ position: pt, speed: 20 })
+        })
+        const data = await res.json()
+        if(data.success){
+          this.capturedImages.splice(i, 1, data.image)
+          this.log(`✓ ${pt.label} 取樣完成`, "ok")
+        } else {
+          this.log(`${pt.label} 失敗：${data.error}`, "error")
+          break
+        }
+      } catch(e){
+        this.log(`取樣失敗：${e.message}`, "error")
+        break
+      }
+    }
+
+    this.capturing = false
+    this.log("取樣結束", "info")
   }
 
 }
@@ -572,7 +754,7 @@ methods:{
 
 .workstation{
  border:1px solid #ccc;
- width: 40%;
+ width: 37%;
 }
 
 .title-worksation h4{
@@ -584,7 +766,7 @@ methods:{
 }
 
 .robot-map{
- margin:5px 10px 8px 10px;
+ margin:8px 15px 10px 15px;
  padding:10px;
  border:1px solid #ccc;
  background:#e9edf2;
@@ -596,6 +778,7 @@ methods:{
 .coordinates-panel{
  position:relative;
  padding-top:10px;
+ padding-left: 15px;
 }
 
 .coordinates{
@@ -613,7 +796,7 @@ methods:{
 }
 
 .coordinates input{
- width:60px;
+ width:90px;
  padding: 2px 3px;
  border-radius:5px;
 }
@@ -622,6 +805,74 @@ methods:{
  position:absolute;
  top:0;
  right:0;
+}
+
+
+/* GRIPPER INDICATOR */
+
+.gripper-indicator{
+ display:flex;
+ align-items:center;
+ gap:10px;
+ margin-top:10px;
+ padding:6px 10px;
+ border:1px solid #ccc;
+ background:#f5f5f5;
+ width:fit-content;
+ border-radius:4px;
+}
+
+.gripper-indicator.g-open{
+ border-color:#2a9d2a;
+ background:#eafaea;
+}
+
+.gripper-indicator.g-closed{
+ border-color:#c28b00;
+ background:#fff8e1;
+}
+
+.gripper-vis{
+ display:flex;
+ align-items:center;
+ gap:3px;
+ height:22px;
+}
+
+.g-jaw{
+ width:7px;
+ height:22px;
+ background:#666;
+ border-radius:2px;
+ transition:transform 0.3s;
+}
+
+.g-left{ transform:translateX(4px); }
+.g-right{ transform:translateX(-4px); }
+.g-left.open{ transform:translateX(-3px); }
+.g-right.open{ transform:translateX(3px); }
+
+.gripper-info{
+ display:flex;
+ flex-direction:column;
+ line-height:1.3;
+}
+
+.gripper-label{
+ font-size:10px;
+ color:#888;
+}
+
+.gripper-state{
+ font-size:12px;
+ font-weight:700;
+ color:#333;
+}
+
+.gripper-countdown{
+ font-size:11px;
+ color:#1e6bd6;
+ font-weight:600;
 }
 
 
@@ -677,7 +928,9 @@ input:checked + .slider:before{
 
 .workspace{
  display:flex;
- gap:13px;
+ gap:20px;
+ padding-left: 18px;
+ padding-top: 10px;
 }
 
 .left-area{
@@ -731,7 +984,7 @@ input:checked + .slider:before{
 /* TRAY */
 
 .tray{
-  width: 150px;
+  width: 160px;
   border: 2.5px solid #b8c1cc;
   background: white;
   padding: 4px 1px;
@@ -764,6 +1017,16 @@ input:checked + .slider:before{
 .tray-cell.active{
  background:#ffd84d;
  border-color:#d4a300;
+}
+
+.tray-cell.running{
+ background:#2ecc71;
+ border-color:#27ae60;
+}
+
+.tray-cell.done{
+ background:#3498db;
+ border-color:#2980b9;
 }
 
 .order-number{
@@ -801,36 +1064,45 @@ input:checked + .slider:before{
 
 .camera-view{
  position:relative;
- height:482px;
  background:#d5d9de;
  border:4px solid #fff;
+ padding:6px;
 }
 
+.scan-progress{
+ text-align:center;
+ padding:6px;
+ font-size:13px;
+ color:#1e6bd6;
+ font-weight:600;
+}
 
-/* vertical center line */
+.image-grid{
+ display:grid;
+ grid-template-columns:repeat(3,1fr);
+ gap:6px;
+}
 
-.v1{
- position:absolute;
- left:50%;
+.image-slot{
+ aspect-ratio:4/3;
+ background:#b8c1cc;
+ border:2px solid #9aa3ad;
+ overflow:hidden;
+ display:flex;
+ align-items:center;
+ justify-content:center;
+}
+
+.slot-img{
+ width:100%;
  height:100%;
- border-left:2px dashed #9aa3ad;
+ object-fit:cover;
 }
 
-
-/* horizontal lines */
-
-.h1{
- position:absolute;
- top:33.33%;
- width:100%;
- border-top:2px dashed #9aa3ad;
-}
-
-.h2{
- position:absolute;
- top:66.66%;
- width:100%;
- border-top:2px dashed #9aa3ad;
+.slot-empty{
+ font-size:28px;
+ font-weight:700;
+ color:#7a8591;
 }
 
 

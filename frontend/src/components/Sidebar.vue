@@ -23,7 +23,7 @@
 <style scoped>
 
 .sidebar{
- width:140px;
+ width:180px;
  height:120vh;
  background:#fff;
  display:flex;

@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package eih;
+
+import "Camera.proto";
+import "google/protobuf/empty.proto";
+
+message isCameraConnectedResponse {
+  bool   isCameraConnected  = 1;
+  string connection_message = 2;
+}
+
+message getIntrinsicsResponse {
+  repeated Intrinsics cam_intrinsics = 1;
+}
+
+message setCapturingSettingsRequest {
+  int64 ShutterTime   = 1;
+  int64 Gain          = 2;
+  int64 wb_redratio   = 3;
+  int64 wb_greenratio = 4;
+  int64 wb_blueratio  = 5;
+  int64 Focus         = 6;
+  int64 ImageSize     = 7;
+}
+
+message getShutterTimeResponse {
+  CaptureSetting_value shuttertime = 1;
+}
+
+message setShutterTimeRequest {
+  int64 shuttertime = 1;
+}
+
+message getGainResponse {
+  CaptureSetting_value gain = 1;
+}
+
+message setGainRequest {
+  int64 gain = 1;
+}
+
+message getFocusResponse {
+  CaptureSetting_value focus = 1;
+}
+
+message setFocusRequest {
+  int64 focus = 1;
+}
+
+message getImageSizeResponse {
+  string ImageSize = 1;
+}
+
+message setImageSizeRequest {
+  int64 ImageSize = 1;
+}
+
+service CameraAPI {
+  rpc isCameraConnected      (google.protobuf.Empty)         returns (isCameraConnectedResponse);
+  rpc getIntrinsics          (google.protobuf.Empty)         returns (getIntrinsicsResponse);
+  rpc getHandEyeParameters   (google.protobuf.Empty)         returns (HandEyeParameters);
+  rpc getImageData           (google.protobuf.Empty)         returns (Image.Data);
+  rpc getImageConfiguration  (google.protobuf.Empty)         returns (Image.Configuration);
+  rpc terminateCameraConnection (google.protobuf.Empty)      returns (google.protobuf.Empty);
+  rpc resumeCameraConnection    (google.protobuf.Empty)      returns (google.protobuf.Empty);
+  rpc getCapturingSettings   (google.protobuf.Empty)         returns (CapturingSettings);
+  rpc setCapturingSettings   (setCapturingSettingsRequest)   returns (google.protobuf.Empty);
+  rpc getShutterTime         (google.protobuf.Empty)         returns (getShutterTimeResponse);
+  rpc setShutterTime         (setShutterTimeRequest)         returns (google.protobuf.Empty);
+  rpc getGain                (google.protobuf.Empty)         returns (getGainResponse);
+  rpc setGain                (setGainRequest)                returns (google.protobuf.Empty);
+  rpc getWhiteBalance        (google.protobuf.Empty)         returns (WhiteBalance);
+  rpc setWhiteBalance        (setCapturingSettingsRequest)   returns (google.protobuf.Empty);
+  rpc getFocus               (google.protobuf.Empty)         returns (getFocusResponse);
+  rpc setFocus               (setFocusRequest)               returns (google.protobuf.Empty);
+  rpc getImageSize           (google.protobuf.Empty)         returns (getImageSizeResponse);
+  rpc setImageSize           (setImageSizeRequest)           returns (google.protobuf.Empty);
+}
