@@ -57,11 +57,11 @@ class CameraClient {
     }
   }
 
-  async isConnected() {
-    if (!this.stub) this.connect()
-    const res = await call(this.stub, "isCameraConnected")
-    return res
-  }
+  // async isConnected() {
+  //   if (!this.stub) this.connect()
+  //   const res = await call(this.stub, "isCameraConnected")
+  //   return res
+  // }
 
   async capture() {
     if (!this.stub) this.connect()

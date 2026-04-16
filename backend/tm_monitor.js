@@ -7,6 +7,12 @@ const net = require("net")
 
 const RTRS_PORT = 5895
 
+const VISION_VARS = [
+  "detectbuttonOnBoard_Shape_Pattern_1_DetectObjectX_TM",
+  "detectbuttonOnBoard_Shape_Pattern_1_DetectObjectY_TM",
+  "detectbuttonOnBoard_Shape_Pattern_1_DetectObjectR_TM",
+]
+
 function checksum(raw) {
   // raw is a Buffer; XOR bytes between '$' and '*'
   const start = raw.indexOf(0x24) + 1  // after '$'
@@ -29,6 +35,7 @@ class TMMonitor {
     this.buffer    = Buffer.alloc(0)
     this.connected = false
     this.pos       = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 }
+    this.vision    = { x: 0, y: 0, r: 0 }
     this._id       = 0
   }
 
@@ -74,20 +81,28 @@ class TMMonitor {
   // ── configure streaming ─────────────────────────────────────────────────────
 
   _configure() {
-    // Mode 9: subscribe to TCP_Value
-    // Binary format: count(LE uint16) + name_len(LE uint16) + name bytes
+    // Mode 9: subscribe TCP_Value (system var — luôn hoạt động)
     const name     = Buffer.from("TCP_Value", "utf8")
-    const itemsBuf = Buffer.from([
-      0x01, 0x00,            // count = 1
-      name.length, 0x00,     // name_len LE uint16
-    ])
+    const itemsBuf = Buffer.from([0x01, 0x00, name.length, 0x00])
     this._sendBin(9, Buffer.concat([itemsBuf, name]))
 
-    // Mode 8: 100ms interval (10 Hz)
+    // Sau khi stream start, subscribe thêm vision vars từng cái một
+    setTimeout(() => this._subscribeVision(), 500)
+
+    // Mode 8: 100ms interval
     this._sendText(8, "100")
 
     // Mode 7: start streaming
     this._sendText(7, "1")
+  }
+
+  _subscribeVision() {
+    if (!this.connected) return
+    for (const varName of VISION_VARS) {
+      const nb  = Buffer.from(varName, "utf8")
+      const buf = Buffer.from([0x01, 0x00, nb.length & 0xff, (nb.length >> 8) & 0xff])
+      this._sendBin(9, Buffer.concat([buf, nb]))
+    }
   }
 
   // ── data parsing ────────────────────────────────────────────────────────────
@@ -105,22 +120,39 @@ class TMMonitor {
   _parsePacket(buf) {
     if (buf.indexOf("$TMRTS") !== 0) return
 
-    // Find "TCP_Value" in the packet buffer
-    const nameBytes = Buffer.from("TCP_Value", "utf8")
-    const nameIdx   = buf.indexOf(nameBytes)
-    if (nameIdx < 0) return
+    // ── TCP_Value (position) ─────────────────────────────────────────────────
+    const tcpName  = Buffer.from("TCP_Value", "utf8")
+    const tcpIdx   = buf.indexOf(tcpName)
+    if (tcpIdx >= 0) {
+      const fs = tcpIdx + tcpName.length + 2   // skip 2-byte value_len
+      if (fs + 24 <= buf.length) {
+        this.pos = {
+          x:  +buf.readFloatLE(fs).toFixed(2),
+          y:  +buf.readFloatLE(fs + 4).toFixed(2),
+          z:  +buf.readFloatLE(fs + 8).toFixed(2),
+          rx: +buf.readFloatLE(fs + 12).toFixed(2),
+          ry: +buf.readFloatLE(fs + 16).toFixed(2),
+          rz: +buf.readFloatLE(fs + 20).toFixed(2),
+        }
+      }
+    }
 
-    // After name: 2-byte LE value_len, then 24 bytes of float32 LE
-    const floatStart = nameIdx + nameBytes.length + 2
-    if (floatStart + 24 > buf.length) return
-
-    this.pos = {
-      x:  +buf.readFloatLE(floatStart).toFixed(2),
-      y:  +buf.readFloatLE(floatStart + 4).toFixed(2),
-      z:  +buf.readFloatLE(floatStart + 8).toFixed(2),
-      rx: +buf.readFloatLE(floatStart + 12).toFixed(2),
-      ry: +buf.readFloatLE(floatStart + 16).toFixed(2),
-      rz: +buf.readFloatLE(floatStart + 20).toFixed(2),
+    // ── Vision variables (X, Y, R) ───────────────────────────────────────────
+    const vals = []
+    for (const varName of VISION_VARS) {
+      const nb  = Buffer.from(varName, "utf8")
+      const idx = buf.indexOf(nb)
+      if (idx < 0) { vals.push(null); continue }
+      const vs = idx + nb.length + 2   // skip 2-byte value_len
+      if (vs + 4 > buf.length) { vals.push(null); continue }
+      vals.push(buf.readFloatLE(vs))
+    }
+    if (vals[0] !== null) {
+      this.vision = {
+        x: Math.round(vals[0]),
+        y: Math.round(vals[1]),
+        r: vals[2] !== null ? +vals[2].toFixed(1) : 0,
+      }
     }
   }
 }

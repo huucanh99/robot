@@ -4,7 +4,8 @@ process.stderr.setEncoding("utf8")
 const express = require("express")
 const sqlite3 = require("sqlite3").verbose()
 const cors    = require("cors")
-const { TMClient }  = require("./tm_client")
+const net     = require("net")
+const { TMClient }     = require("./tm_client")
 const { TMMonitor }    = require("./tm_monitor")
 const { CameraClient } = require("./camera_client")
 
@@ -21,20 +22,176 @@ tmMonitor.currentLabel = null
 tmMonitor.doneLabels   = []
 let tagCounter = 0
 
+// ─── Vision TCP server (nhận SendString từ TMflow) ───────────────────────────
+// Dữ liệu mong muốn từ robot:
+// x:1188.9425, y:1022.4306, r:85.35795
+//
+// Hoặc từng dòng JSON:
+// {"x":1188.9425,"y":1022.4306,"r":85.35795}
+
+let latestVision = {
+  objects: [],
+  ts: null,
+  done: false,
+}
+
+function resetVisionFrame() {
+  latestVision = {
+    objects: [],
+    ts: Date.now(),
+    done: false,
+  }
+}
+
+function parseVisionTextLine(s) {
+  // Parse dạng:
+  // x:1188.94, y:1022.43, r:85.35
+  // hoặc x:1188.94,y:1022.43,r:85.35
+  const obj = {}
+
+  const parts = s.split(",")
+  for (const part of parts) {
+    const item = part.trim()
+    if (!item) continue
+
+    const idx = item.indexOf(":")
+    if (idx === -1) continue
+
+    const key = item.slice(0, idx).trim().toLowerCase()
+    const rawValue = item.slice(idx + 1).trim()
+    const value = Number(rawValue)
+
+    if (!Number.isNaN(value)) {
+      obj[key] = value
+    } else {
+      obj[key] = rawValue
+    }
+  }
+
+  return obj
+}
+
+const visionServer = net.createServer(socket => {
+  console.log("[Vision] Client connected:", socket.remoteAddress)
+
+  let buf = ""
+  let doneTimer = null
+
+  function scheduleDone() {
+    if (doneTimer) clearTimeout(doneTimer)
+    doneTimer = setTimeout(() => {
+      latestVision.done = true
+      console.log(`[Vision] done — ${latestVision.objects.length} object(s) total`)
+    }, 500)
+  }
+
+  // mỗi lần robot connect mới, coi như frame mới
+  resetVisionFrame()
+
+  socket.on("data", chunk => {
+    buf += chunk.toString()
+
+    const lines = buf.split(/\r?\n/)
+    buf = lines.pop()
+
+    for (const line of lines) {
+      const s = line.trim()
+      if (!s) continue
+
+      try {
+        const data = JSON.parse(s)
+
+        // Format từ vision_opencv.py: { found, objects: [{x,y,r,...}], occupied }
+        if (Array.isArray(data.objects)) {
+          if (data.found && data.objects.length > 0) {
+            latestVision.objects = data.objects.map(o => ({
+              x: Number(o.x), y: Number(o.y), r: Number(o.r || 0), ts: Date.now()
+            }))
+            latestVision.ts = Date.now()
+            console.log(`[Vision][Full] ${latestVision.objects.length} object(s)`)
+          }
+          // found: false → giữ nguyên latestVision (hold frames đã xử lý bên Python)
+          scheduleDone()
+          continue
+        }
+
+        // Format đơn lẻ từ robot SendString: { x, y, r }
+        if (data.x !== undefined || data.y !== undefined) {
+          const obj = { x: Number(data.x), y: Number(data.y), r: Number(data.r || 0), ts: Date.now() }
+          latestVision.objects.push(obj)
+          latestVision.ts = Date.now()
+          console.log("[Vision][JSON]", obj)
+          scheduleDone()
+        }
+      } catch (_) {
+        // parse text kiểu x:..., y:..., r:...
+        const parsed = parseVisionTextLine(s)
+        if (Object.keys(parsed).length > 0) {
+          const obj = {
+            x: parsed.x ?? 0, y: parsed.y ?? 0, r: parsed.r ?? 0, ts: Date.now()
+          }
+          latestVision.objects.push(obj)
+          latestVision.ts = Date.now()
+          console.log("[Vision][TEXT]", obj)
+          scheduleDone()
+        } else {
+          console.warn("[Vision] parse error:", s)
+        }
+      }
+    }
+  })
+
+  socket.on("error", err => {
+    console.warn("[Vision] socket error:", err.message)
+  })
+
+  socket.on("close", () => {
+    console.log("[Vision] client disconnected")
+    latestVision.done = true
+
+    if (latestVision.objects.length > 0) {
+      console.log("🔥 ALL DETECTED OBJECTS:")
+      console.table(latestVision.objects)
+    }
+  })
+})
+
+visionServer.listen(8765, () => console.log("[Vision] TCP server listening on port 8765"))
+
 
 // ─── Robot endpoints ──────────────────────────────────────────────────────────
 
 app.post("/robot/connect", async (req, res) => {
   const { ip = "127.0.0.1" } = req.body
+
+  // Luôn connect TMRTS monitor trước, độc lập với Listen Node
+  if (!tmMonitor.connected) {
+    tmMonitor.connect(ip).catch(e => console.warn("[Monitor] connect failed:", e.message))
+  }
+
   if (tmClient.connected) return res.json({ success: true })
+
   try {
     tmClient.ip = ip
     await tmClient.connect()
     await tmClient.waitForListenNode()
-    tmMonitor.connect(ip).catch(e => console.warn("[Monitor] SVRD connect failed:", e.message))
     res.json({ success: true })
   } catch (e) {
     tmClient.disconnect()
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Kết nối chỉ TMRTS monitor (không cần Listen Node)
+app.post("/monitor/connect", async (req, res) => {
+  const { ip } = req.body
+  if (!ip) return res.status(400).json({ error: "IP required" })
+
+  try {
+    if (tmMonitor.connected) tmMonitor.disconnect()
+    await tmMonitor.connect(ip)
+    res.json({ success: true })
+  } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
@@ -50,12 +207,13 @@ app.get("/robot/position", (req, res) => {
     ...tmMonitor.pos,
     _monitorConnected: tmMonitor.connected,
     currentLabel: tmMonitor.currentLabel,
-    doneLabels:   tmMonitor.doneLabels,
+    doneLabels: tmMonitor.doneLabels,
   })
 })
 
 app.post("/robot/run", async (req, res) => {
   const { points, speed = 30 } = req.body
+
   if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
   if (tmClient.running) return res.status(400).json({ error: "Already running" })
   if (!points || points.length === 0) return res.status(400).json({ error: "No points selected" })
@@ -63,27 +221,40 @@ app.post("/robot/run", async (req, res) => {
   tmClient.running = true
   tmMonitor.currentLabel = null
   tmMonitor.doneLabels   = []
+
   try {
     for (const pt of points) {
       if (!tmClient.running) break
+
       tagCounter++
       const tag = tagCounter
       const pos = `${pt.x},${pt.y},${pt.z},${pt.rx},${pt.ry},${pt.rz}`
       tmMonitor.currentLabel = pt.label
+
       const ok = await tmClient.sendScript(`move${tag}`, [
         `PTP("CPP",{${pos}},${speed},0,0,false)`,
         `QueueTag(${tag},1)`,
       ])
+
       if (!ok) {
         tmMonitor.currentLabel = null
         tmClient.running = false
         return res.status(500).json({ error: `Point ${pt.label} failed` })
       }
+
       await tmClient.waitQueueTag(tag)
-      tmMonitor.pos = { x: pt.x, y: pt.y, z: pt.z, rx: pt.rx, ry: pt.ry, rz: pt.rz }
+      tmMonitor.pos = {
+        x: pt.x,
+        y: pt.y,
+        z: pt.z,
+        rx: pt.rx,
+        ry: pt.ry,
+        rz: pt.rz,
+      }
       tmMonitor.doneLabels.push(pt.label)
       tmMonitor.currentLabel = null
     }
+
     tmClient.running = false
     res.json({ success: true })
   } catch (e) {
@@ -94,6 +265,7 @@ app.post("/robot/run", async (req, res) => {
 
 app.post("/robot/stop", async (req, res) => {
   tmClient.running = false
+
   try {
     if (tmClient.connected) {
       await tmClient.sendScript("abort", ["StopAndClearBuffer(0)"])
@@ -117,11 +289,19 @@ app.post("/camera/connect", (req, res) => {
 app.get("/camera/status", async (req, res) => {
   try {
     const r = await cameraClient.isConnected()
-    res.json({ isCameraConnected: r.isCameraConnected, connection_message: r.connection_message, serverReachable: true })
+    res.json({
+      isCameraConnected: r.isCameraConnected,
+      connection_message: r.connection_message,
+      serverReachable: true,
+    })
   } catch (e) {
     // code 12 = server reachable but camera not initialized
     const serverReachable = e.code === 12 || (e.message && e.message.includes("12"))
-    res.json({ isCameraConnected: false, serverReachable, connection_message: e.message })
+    res.json({
+      isCameraConnected: false,
+      serverReachable,
+      connection_message: e.message,
+    })
   }
 })
 
@@ -134,12 +314,102 @@ app.get("/camera/capture", async (req, res) => {
   }
 })
 
+// ─── Vision endpoints ─────────────────────────────────────────────────────────
+
+app.post("/vision/reset", (req, res) => {
+  resetVisionFrame()
+  res.json({ success: true })
+})
+
+app.post("/vision/trigger", async (req, res) => {
+  console.log(`[Trigger] connected=${tmClient.connected}, ip=${tmClient.ip}`)
+
+  // Auto-reconnect nếu socket bị đóng
+  if (!tmClient.connected && tmClient.ip) {
+    console.log(`[Trigger] Reconnecting to ${tmClient.ip}...`)
+    try {
+      await tmClient.connect()
+      await tmClient.waitForListenNode()
+      console.log("[Trigger] Reconnected OK")
+    } catch (e) {
+      console.warn("[Trigger] Reconnect failed:", e.message)
+      return res.status(400).json({ error: "Robot not connected: " + e.message })
+    }
+  }
+
+  if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
+
+  try {
+    resetVisionFrame()
+    await tmClient.sendScript("vt", ["ScriptExit(1)"])
+    res.json({ success: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+// ─── Tray pixel mapping ──────────────────────────────────────────────────────
+// Tọa độ robot gửi về là pixel của ảnh camera.
+// Điều chỉnh TRAY1_ORIGIN_X/Y và CELL_W/H theo camera thực tế.
+//
+// Cách xác định:
+//   1. Chạy vision → đọc GET /vision/debug → xem raw objects
+//   2. Đặt vật ở ô (1,1) (góc trên-trái tray1) → ghi lại x, y → đó là TRAY1_ORIGIN
+//   3. Đặt vật ở ô hàng kế (4 cols × 5 rows = 20 cells)
+//      → CELL_W = khoảng cách X giữa 2 ô liền nhau
+//      → CELL_H = khoảng cách Y giữa 2 ô liền nhau
+
+const TRAY1_ORIGIN_X = 981   // calibrated: cell1.x - CELL_W/2
+const TRAY1_ORIGIN_Y = 265   // calibrated: cell1.y - CELL_H/2
+const CELL_W = 281           // (cell20.x - cell1.x) / 3
+const CELL_H = 168           // (cell16.y - cell1.y) / 4  (bottom-left col)
+
+function mapToTray(objects) {
+  const result = {
+    tray1: [], tray2: [], tray3: [],
+    tray4: [], tray5: [], tray6: []
+  }
+
+  objects.forEach(obj => {
+    const col = Math.floor((obj.x - TRAY1_ORIGIN_X) / CELL_W)
+    const row = Math.floor((obj.y - TRAY1_ORIGIN_Y) / CELL_H)
+
+    if (col >= 0 && col < 4 && row >= 0 && row < 5) {
+      const cell = row * 4 + col + 1
+      if (!result.tray1.includes(cell)) result.tray1.push(cell)
+    }
+  })
+
+  return result
+}
+app.get("/vision/debug", (req, res) => {
+  res.json({
+    raw: tmMonitor.vision,
+    latestVision,
+    monitorConnected: tmMonitor.connected,
+  })
+})
+
+app.get("/vision/latest", (req, res) => {
+  const objects = latestVision.objects || []
+
+  const mapped = mapToTray(objects)
+
+  res.json({
+    found: objects.length > 0,
+    done: latestVision.done,
+    objects,
+    occupied: mapped
+  })
+})
+
 app.post("/robot/move-one", async (req, res) => {
   const { point, speed = 30 } = req.body
+
   if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
-  if (tmClient.running)    return res.status(400).json({ error: "Already running" })
+  if (tmClient.running) return res.status(400).json({ error: "Already running" })
 
   tmClient.running = true
+
   try {
     tagCounter++
     const tag = tagCounter
@@ -150,15 +420,25 @@ app.post("/robot/move-one", async (req, res) => {
       `PTP("CPP",{${pos}},${speed},0,0,false)`,
       `QueueTag(${tag},1)`,
     ])
+
     if (!ok) {
       tmClient.running = false
       return res.status(500).json({ error: `Move to ${point.label} failed` })
     }
+
     await tmClient.waitQueueTag(tag)
-    tmMonitor.pos = { x: point.x, y: point.y, z: point.z, rx: point.rx, ry: point.ry, rz: point.rz }
+    tmMonitor.pos = {
+      x: point.x,
+      y: point.y,
+      z: point.z,
+      rx: point.rx,
+      ry: point.ry,
+      rz: point.rz,
+    }
     tmMonitor.doneLabels.push(point.label)
     tmMonitor.currentLabel = null
     tmClient.running = false
+
     res.json({ success: true })
   } catch (e) {
     tmClient.running = false
@@ -168,14 +448,16 @@ app.post("/robot/move-one", async (req, res) => {
 
 app.post("/camera/move-and-capture", async (req, res) => {
   const { position, speed = 20 } = req.body
+
   if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
-  if (tmClient.running)    return res.status(400).json({ error: "Already running" })
+  if (tmClient.running) return res.status(400).json({ error: "Already running" })
 
   tmClient.running = true
+
   try {
     tagCounter++
     const tag = tagCounter
-    const pt  = position
+    const pt = position
     const pos = `${pt.x},${pt.y},${pt.z},${pt.rx},${pt.ry},${pt.rz}`
     tmMonitor.currentLabel = pt.label
 
@@ -183,12 +465,21 @@ app.post("/camera/move-and-capture", async (req, res) => {
       `PTP("CPP",{${pos}},${speed},0,0,false)`,
       `QueueTag(${tag},1)`,
     ])
+
     if (!ok) {
       tmClient.running = false
       return res.status(500).json({ error: `Move to ${pt.label} failed` })
     }
+
     await tmClient.waitQueueTag(tag)
-    tmMonitor.pos = { x: pt.x, y: pt.y, z: pt.z, rx: pt.rx, ry: pt.ry, rz: pt.rz }
+    tmMonitor.pos = {
+      x: pt.x,
+      y: pt.y,
+      z: pt.z,
+      rx: pt.rx,
+      ry: pt.ry,
+      rz: pt.rz,
+    }
     tmMonitor.doneLabels.push(pt.label)
     tmMonitor.currentLabel = null
     tmClient.running = false
@@ -200,6 +491,7 @@ app.post("/camera/move-and-capture", async (req, res) => {
     res.status(500).json({ error: e.message })
   }
 })
+
 
 // ─── Recipe endpoints ─────────────────────────────────────────────────────────
 
@@ -247,4 +539,18 @@ app.delete("/recipes/:id", (req, res) => {
 
 app.listen(3000, () => {
   console.log("server running")
+  // Auto-connect TMRTS monitor dùng cùng IP với camera
+  autoConnectMonitor(cameraClient.ip)
 })
+
+function autoConnectMonitor(ip) {
+  if (tmMonitor.connected) return
+
+  console.log(`[Monitor] Connecting to ${ip}:5895...`)
+  tmMonitor.connect(ip)
+    .then(() => console.log("[Monitor] Connected"))
+    .catch(e => {
+      console.warn("[Monitor] Failed:", e.message, "— retry in 5s")
+      setTimeout(() => autoConnectMonitor(ip), 5000)
+    })
+}
