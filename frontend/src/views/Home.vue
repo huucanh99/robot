@@ -259,9 +259,11 @@
 
           <button class="btn sample" @click="captureImage" :disabled="capturing">取樣</button>
 
-          <button class="btn start" @click="startRun">開始</button>
+          <button class="btn start" @click="startRun" :disabled="isRunning && !isPaused">
+            {{ isPaused ? '繼續' : '開始' }}
+          </button>
 
-          <button class="btn pause" @click="pauseRun">暫停</button>
+          <button class="btn pause" @click="pauseRun" :disabled="!isRunning || isPaused">暫停</button>
 
           <button class="btn stop" @click="stopRun">停止 / 重置</button>
 
@@ -294,15 +296,15 @@
 
 // ======= GIỮ NGUYÊN TOÀN BỘ PHẦN TRÊN =======
 const TRAY_BASE = {
-  tray1: { x: 200, y: 150 },
+  tray1: { x: 500, y: 250 },
   tray2: { x: 200, y: 280 },
   tray3: { x: 200, y: 410 },
   tray4: { x: 350, y: 150 },
   tray5: { x: 350, y: 280 },
   tray6: { x: 350, y: 410 },
 }
-const CELL_SPACING_X = 20
-const CELL_SPACING_Y = 20
+const CELL_SPACING_X = 50
+const CELL_SPACING_Y = 50
 const FIXED_Z  = 200
 const FIXED_RX = 180
 const FIXED_RY = 0
@@ -322,10 +324,12 @@ const SCAN_POSITIONS = [ POS_SCAN_1 ]
 
 function getCellCoords(tray, cell) {
   const base = TRAY_BASE[tray]
-  const n = parseInt(cell) - 1
+  const n   = parseInt(cell) - 1
+  const col = n % 4               // 0→3, trái→phải
+  const row = Math.floor(n / 4)   // 0→4, trên→dưới
   return {
-    x: base.x + (n % 4) * CELL_SPACING_X,
-    y: base.y + Math.floor(n / 4) * CELL_SPACING_Y,
+    x: base.x - row * CELL_SPACING_X,   // rows đi theo -X (xa robot hơn)
+    y: base.y - col * CELL_SPACING_Y,   // columns đi theo -Y (phải = giảm Y)
     z: FIXED_Z,
     rx: FIXED_RX,
     ry: FIXED_RY,
@@ -350,11 +354,14 @@ data(){
     pos: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
     posTimer: null,
     runningLabel: null,
+    processingLabel: null,
     doneLabels: [],
-    capturedImages: [null], // 🔥 chỉ 1 ảnh
+    capturedImages: [null],
     capturing: false,
     gripperOpen: true,
     countdown: 0,
+    isRunning: false,
+    isPaused: false,
 
     // 🔥 THÊM AI
     occupiedCells: {
@@ -394,13 +401,25 @@ methods:{
       this.isConnected = !this.isConnected
 
       if(this.isConnected){
+        this.log(`已連線到手臂 ${this.robotIP}`, "ok")
         this.posTimer = setInterval(async ()=>{
           const r = await fetch("http://localhost:3000/robot/position")
-          this.pos = await r.json()
+          const data = await r.json()
+          this.pos = data
+          if(data.currentLabel    !== undefined) this.runningLabel    = data.currentLabel
+          if(data.processingLabel !== undefined) this.processingLabel = data.processingLabel
+          if(Array.isArray(data.doneLabels)) this.doneLabels = data.doneLabels
+          if(data.gripperOpen !== undefined) this.gripperOpen = data.gripperOpen
+          if(data.countdown   !== undefined) this.countdown   = data.countdown
+          if(data.running     !== undefined) this.isRunning   = data.running
+          if(data.paused      !== undefined) this.isPaused    = data.paused
         },300)
       }else{
         clearInterval(this.posTimer)
+        this.log("已斷線", "error")
       }
+    } else {
+      this.log(`${action === "connect" ? "連線" : "斷線"}失敗: ${data.error || "未知錯誤"}`, "error")
     }
   },
 
@@ -429,10 +448,14 @@ methods:{
     }
     this.log("已觸發，等待座標...", "info")
 
-    // 2. Poll tọa độ robot gửi về qua TCP port 8765
+    // 2. Poll tọa độ robot gửi về qua TCP port 8765 (tối đa 30s)
     let result = null
-    for(let i = 0; i < 20; i++){
+    const MAX_WAIT = 30
+    for(let i = 0; i < MAX_WAIT * 2; i++){
       await new Promise(r => setTimeout(r, 500))
+      const elapsed = Math.floor(i / 2) + 1
+      if(elapsed % 5 === 0) this.log(`等待中... ${elapsed}s`, "info")
+
       const vr = await fetch("http://localhost:3000/vision/latest")
       const d  = await vr.json()
       if(d && d.done){
@@ -442,7 +465,7 @@ methods:{
     }
 
     if(!result){
-      this.log("未收到座標資料", "error")
+      this.log(`超時 ${MAX_WAIT}s — 未收到座標資料`, "error")
       this.capturing = false
       return
     }
@@ -491,30 +514,107 @@ methods:{
     img.src = this.capturedImages[0]
   },
 
-  async startRun(){ /* giữ nguyên */ },
-  pauseRun(){},
+  async startRun(){
+    if(!this.isConnected){
+      this.log("請先連線機器手臂", "error")
+      return
+    }
+
+    // Resume nếu đang tạm dừng
+    if(this.isPaused){
+      const res = await fetch("http://localhost:3000/robot/resume", { method: "POST" })
+      const data = await res.json()
+      if(data.success) this.log("繼續執行", "ok")
+      else this.log("繼續失敗: " + (data.error || ""), "error")
+      return
+    }
+
+    // Build point list từ orders, sort theo thứ tự đã chọn
+    const points = []
+    for(const [tray, cells] of Object.entries(this.orders)){
+      for(const [n, orderNum] of Object.entries(cells)){
+        const coords = getCellCoords(tray, n)
+        points.push({ ...coords, label: `${tray}-${n}`, _order: orderNum })
+      }
+    }
+
+    if(points.length === 0){
+      this.log("請先選擇格位", "error")
+      return
+    }
+
+    points.sort((a, b) => a._order - b._order)
+    const payload = points.map(({ _order, ...p }) => p)
+
+    this.log(`開始執行 ${payload.length} 個格位...`, "info")
+    this.doneLabels  = []
+    this.runningLabel = null
+
+    const res = await fetch("http://localhost:3000/robot/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ points: payload, speed: 30 })
+    })
+
+    const data = await res.json()
+    if(data.success){
+      this.log("執行完成 ✓", "ok")
+    } else {
+      this.log("執行失敗: " + (data.error || ""), "error")
+    }
+  },
+
+  async pauseRun(){
+    const res = await fetch("http://localhost:3000/robot/pause", { method: "POST" })
+    const data = await res.json()
+    if(data.success) this.log("已暫停 — 按開始繼續", "info")
+    else this.log("暫停失敗: " + (data.error || ""), "error")
+  },
+
   async stopRun(){
-    await fetch("http://localhost:3000/robot/stop",{method:"POST"})
+    await fetch("http://localhost:3000/robot/stop", { method: "POST" })
+    this.isPaused    = false
+    this.isRunning   = false
+    this.doneLabels  = []
+    this.runningLabel    = null
+    this.processingLabel = null
+    this.log("已停止並重置", "error")
   },
 
   toggleCell(tray, n){
     if(!this.selectMode) return
     if(this.orders[tray][n]){
       delete this.orders[tray][n]
+      this._renumberOrders()
     } else {
+      if(!(this.occupiedCells[tray] || []).includes(n)) return
       this.orders[tray][n] = this.currentOrder++
     }
+  },
+
+  _renumberOrders(){
+    const all = []
+    for(const [tray, cells] of Object.entries(this.orders)){
+      for(const [n, order] of Object.entries(cells)){
+        all.push({ tray, n, order })
+      }
+    }
+    all.sort((a, b) => a.order - b.order)
+    all.forEach((item, idx) => {
+      this.orders[item.tray][item.n] = idx + 1
+    })
+    this.currentOrder = all.length + 1
   },
 
   // 🔥 FIX highlight
   cellClass(tray, n){
     const label = `${tray}-${n}`
 
-    if(this.runningLabel === label) return { active: true, running: true }
-    if(this.doneLabels.includes(label)) return { active: true, done: true }
-    if(this.orders[tray][n]) return { active: true }
+    if(this.doneLabels.includes(label))   return { active: true, done: true }
+    if(this.processingLabel === label)    return { active: true, running: true }
+    if(this.runningLabel === label)       return { active: true, running: true }
+    if(this.orders[tray][n])             return { active: true }
 
-    // 🔥 AI
     if((this.occupiedCells[tray] || []).includes(n))
       return { occupied: true }
 

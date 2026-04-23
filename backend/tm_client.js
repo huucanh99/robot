@@ -7,7 +7,7 @@ const net = require("net")
 
 const ROBOT_PORT      = 5890
 const CONNECT_TIMEOUT = 5000   // ms — connection attempt
-const IDLE_TIMEOUT    = 60000  // ms — idle after connected
+const IDLE_TIMEOUT    = 600000 // ms — idle after connected (10 phút)
 
 // ── Checksum ───────────────────────────────────────────────────────────────
 
@@ -171,6 +171,7 @@ class TMClient {
   // ── send TMscript ───────────────────────────────────────────────────────
 
   async sendScript(scriptId, scriptLines) {
+    this.tmsctQueue = []  // drain stale packets từ Listen Node entry cũ
     const data = `${scriptId},` + scriptLines.join("\r\n")
     console.log(`[sendScript] sending ${scriptId}`)
     this.sendRaw("TMSCT", data)
@@ -178,23 +179,25 @@ class TMClient {
     if (!resp) { console.log(`[TMSCT] timeout id=${scriptId}`); return false }
     if (resp.header === "CPERR") { console.log(`[CPERR] ${resp.data}`); return false }
     const ok = resp.data.includes(",OK")
-    console.log(`[TMSCT] ${ok ? "OK" : "FAIL"} id=${scriptId}`)
+    console.log(`[TMSCT] ${ok ? "OK" : "FAIL"} id=${scriptId} — resp: ${resp.data}`)
     return ok
   }
 
   // ── wait QueueTag ───────────────────────────────────────────────────────
 
-  async waitQueueTag(tagId, pollInterval = 500, maxWait = 200000) {
+  async waitQueueTag(tagId, pollInterval = 100, maxWait = 60000) {
     const deadline = Date.now() + maxWait
     console.log(`[Wait] QueueTag ${tagId}...`)
     while (true) {
+      if (!this.running)
+        throw new Error(`QueueTag ${tagId} aborted`)
       if (Date.now() > deadline)
         throw new Error(`QueueTag ${tagId} timeout — robot không phản hồi sau ${maxWait / 1000}s`)
       this.sendRaw("TMSTA", `01,${tagId}`)
       const resp = await this.recvTMSTA(10000)
       if (!resp) throw new Error(`QueueTag ${tagId} — không nhận được phản hồi TMSTA`)
       const parts = resp.data.split(",")
-      if (parts.length >= 3 && parts[2].toLowerCase() === "true") {
+      if (parts.length >= 3 && parts[1] === String(tagId) && parts[2].toLowerCase() === "true") {
         console.log(`[QueueTag ${tagId}] Done`)
         return
       }

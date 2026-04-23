@@ -49,6 +49,7 @@ class TMMonitor {
       this.socket.on("timeout", () => reject(new Error("RTRS timeout")))
       this.socket.connect(RTRS_PORT, ip, () => {
         this.connected = true
+        this.socket.setTimeout(30000)  // longer idle timeout after connected
         this._configure()
         resolve()
       })
