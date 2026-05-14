@@ -294,47 +294,35 @@
 
 <script>
 
-// ======= GIỮ NGUYÊN TOÀN BỘ PHẦN TRÊN =======
-const TRAY_BASE = {
-  tray1: { x: 500, y: 250 },
-  tray2: { x: 200, y: 280 },
-  tray3: { x: 200, y: 410 },
-  tray4: { x: 350, y: 150 },
-  tray5: { x: 350, y: 280 },
-  tray6: { x: 350, y: 410 },
+// 4 góc tray 1 — tọa độ robot đo thực tế (camera TCP, cùng approach height)
+const TRAY1_CORNERS = {
+  tl: { x: 613,   y: 133   },  // cell 1  (col=0, row=0)
+  tr: { x: 599,   y: 15    },  // cell 4  (col=3, row=0)
+  bl: { x: 507,   y: 145   },  // cell 17 (col=0, row=4)
+  br: { x: 492,   y: 26    },  // cell 20 (col=3, row=4)
 }
-const CELL_SPACING_X = 50
-const CELL_SPACING_Y = 50
-const FIXED_Z  = 200
-const FIXED_RX = 180
-const FIXED_RY = 0
-const FIXED_RZ = 0
-
-const POS_INSPECT = { label: "inspect", x: 275, y:   0, z: 400, rx: 180, ry: 0, rz: 0 }
-const POS_STANDBY = { label: "standby", x:   0, y: 300, z: 500, rx: 180, ry: 0, rz: 0 }
-const LOWER_MM    = 80
-
-function lower(pt) { return { ...pt, z: pt.z - LOWER_MM, label: pt.label + '-down' } }
-function lift(pt)  { return { ...pt, label: pt.label + '-up' } }
-
-const POS_SCAN_1 = { label: "scan-1", x: 200, y: 150, z: 300, rx: 180, ry: 0, rz: 0 }
-
-// 👉 CHỈ 1 TRAY
-const SCAN_POSITIONS = [ POS_SCAN_1 ]
 
 function getCellCoords(tray, cell) {
-  const base = TRAY_BASE[tray]
-  const n   = parseInt(cell) - 1
-  const col = n % 4               // 0→3, trái→phải
-  const row = Math.floor(n / 4)   // 0→4, trên→dưới
-  return {
-    x: base.x - row * CELL_SPACING_X,   // rows đi theo -X (xa robot hơn)
-    y: base.y - col * CELL_SPACING_Y,   // columns đi theo -Y (phải = giảm Y)
-    z: FIXED_Z,
-    rx: FIXED_RX,
-    ry: FIXED_RY,
-    rz: FIXED_RZ,
+  const cellNum = parseInt(cell)
+  const col = (cellNum - 1) % 4
+  const row = Math.floor((cellNum - 1) / 4)
+
+  if (tray === 'tray1') {
+    const s = col / 3
+    const t = row / 4
+    const { tl, tr, bl, br } = TRAY1_CORNERS
+    const x = (1-s)*(1-t)*tl.x + s*(1-t)*tr.x + (1-s)*t*bl.x + s*t*br.x
+    const y = (1-s)*(1-t)*tl.y + s*(1-t)*tr.y + (1-s)*t*bl.y + s*t*br.y
+    return { x: +x.toFixed(2), y: +y.toFixed(2) }
   }
+
+  // Trays chưa calibrate — placeholder
+  const TRAY_BASE = {
+    tray2: { x: 200, y: 280 }, tray3: { x: 200, y: 410 },
+    tray4: { x: 350, y: 150 }, tray5: { x: 350, y: 280 }, tray6: { x: 350, y: 410 },
+  }
+  const base = TRAY_BASE[tray] || { x: 300, y: 300 }
+  return { x: base.x - row * 50, y: base.y - col * 50 }
 }
 
 export default {
@@ -363,12 +351,13 @@ data(){
     isRunning: false,
     isPaused: false,
 
-    // 🔥 THÊM AI
     occupiedCells: {
       tray1:[], tray2:[], tray3:[],
       tray4:[], tray5:[], tray6:[]
     },
-    visionObjects: []
+    visionObjects: [],
+    visionRobotPoints: [],
+    visionCalibrated: false,
   }
 },
 
@@ -471,8 +460,16 @@ methods:{
     }
 
     this.log(`偵測到 ${result.objects.length} 個物件`, "ok")
-    this.visionObjects       = result.objects
-    this.occupiedCells.tray1 = result.occupied.tray1 || []
+    this.visionObjects        = result.objects
+    this.occupiedCells.tray1  = result.occupied.tray1 || []
+    this.visionRobotPoints    = result.robotPoints || []
+    this.visionCalibrated     = result.calibrated || false
+
+    if(this.visionCalibrated && this.visionRobotPoints.length > 0){
+      this.log(`已換算 ${this.visionRobotPoints.length} điểm robot (vision auto)`, "ok")
+    } else if(!this.visionCalibrated){
+      this.log("⚠️ Chưa calibrate 4 góc robot — dùng cell thủ công", "info")
+    }
 
     // 3. Chụp ảnh để hiển thị + vẽ dot
     try {
@@ -529,22 +526,28 @@ methods:{
       return
     }
 
-    // Build point list từ orders, sort theo thứ tự đã chọn
-    const points = []
-    for(const [tray, cells] of Object.entries(this.orders)){
-      for(const [n, orderNum] of Object.entries(cells)){
-        const coords = getCellCoords(tray, n)
-        points.push({ ...coords, label: `${tray}-${n}`, _order: orderNum })
-      }
-    }
+    // Build point list — ưu tiên cell chọn tay, fallback sang vision auto
+    const hasManualOrders = Object.values(this.orders).some(cells => Object.keys(cells).length > 0)
 
-    if(points.length === 0){
-      this.log("請先選擇格位", "error")
+    let payload
+    if(hasManualOrders){
+      const points = []
+      for(const [tray, cells] of Object.entries(this.orders)){
+        for(const [n, orderNum] of Object.entries(cells)){
+          const coords = getCellCoords(tray, n)
+          points.push({ ...coords, label: `${tray}-${n}`, _order: orderNum })
+        }
+      }
+      points.sort((a, b) => a._order - b._order)
+      payload = points.map(({ _order, ...p }) => p)
+      this.log(`手動模式: ${payload.length} 個格位`, "info")
+    } else if(this.visionCalibrated && this.visionRobotPoints.length > 0){
+      payload = this.visionRobotPoints
+      this.log(`Vision 自動模式: ${payload.length} 個物件`, "info")
+    } else {
+      this.log("請先取樣或選擇格位", "error")
       return
     }
-
-    points.sort((a, b) => a._order - b._order)
-    const payload = points.map(({ _order, ...p }) => p)
 
     this.log(`開始執行 ${payload.length} 個格位...`, "info")
     this.doneLabels  = []

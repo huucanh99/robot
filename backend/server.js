@@ -5,6 +5,7 @@ const express = require("express")
 const sqlite3 = require("sqlite3").verbose()
 const cors    = require("cors")
 const net     = require("net")
+const fs      = require("fs")
 const { TMClient }     = require("./tm_client")
 const { TMMonitor }    = require("./tm_monitor")
 const { CameraClient } = require("./camera_client")
@@ -21,15 +22,32 @@ const cameraClient = new CameraClient()
 tmMonitor.currentLabel    = null
 tmMonitor.processingLabel = null
 tmMonitor.doneLabels      = []
-let tagCounter = 0
+
+const TAG_COUNTER_FILE = "./tagcounter"
+function loadTagCounter() {
+  try {
+    const v = parseInt(fs.readFileSync(TAG_COUNTER_FILE, "utf8"))
+    if (Number.isInteger(v) && v > 0) return v + 100  // skip past last run + buffer
+  } catch (_) {}
+  return 100
+}
+function saveTagCounter() {
+  try { fs.writeFileSync(TAG_COUNTER_FILE, String(tagCounter)) } catch (_) {}
+}
+let tagCounter = loadTagCounter()
 let gripperOpen       = true
 let inspectCountdown  = 0
 let robotPaused       = false
 
-const POS_INSPECT    = { label: "inspect", x: 325, y: 0,   z: 400, rx: 180, ry: 0, rz: 0 }
-const POS_SAFE       = { label: "safe",    x: 0,   y: 300, z: 500, rx: 180, ry: 0, rz: 0 }
+const ORI            = { rx: 180, ry: 0, rz: 90 }           // orientation cố định toàn bộ
+const POS_SAFE       = { label: "safe",    x: 585, y: 100,  z: 250, ...ORI }
+const POS_INSPECT    = { label: "inspect", x: 585, y: -400, z: 250, ...ORI }
+
+const TRAY_PICK_Z    = 0     // ← z khi gripper chạm vật
+const TRAY_HOVER_Z   = 80    // ← z hover khi di chuyển (đủ cao tránh va chạm)
+const LOWER_MM       = TRAY_HOVER_Z - TRAY_PICK_Z   // tự tính = 100
+
 const INSPECT_WAIT_MS = 10000
-const LOWER_MM        = 80
 
 // ─── Vision TCP server (nhận SendString từ TMflow) ───────────────────────────
 // Dữ liệu mong muốn từ robot:
@@ -252,11 +270,20 @@ async function movePt(pt, speed) {
 
   return tag
 }
-async function waitTagSafe(tag, timeout = 5000) {
+// Wrap script lines with QueueTag(1,0) at start (clear stale) and QueueTag(1,1) at end (signal done)
+function tagWrap(lines) {
+  return ["QueueTag(1,0)", ...lines, "QueueTag(1,1)"]
+}
+
+// Wait 150ms (for QueueTag clear to execute), then poll until QueueTag(1) is true
+async function waitTag(scriptId, maxWait = 60000) {
+  await new Promise(r => setTimeout(r, 150))
   try {
-    await waitQueueTagWithTimeout(tag, timeout)
+    await tmClient.waitQueueTag(1, 100, maxWait)
+    return true
   } catch (e) {
-    console.warn("⚠️ miss tag nhưng vẫn tiếp tục:", tag)
+    console.warn(`[${scriptId}] waitTag: ${e.message}`)
+    return false
   }
 }
 async function waitIfPaused() {
@@ -275,14 +302,6 @@ async function waitWithCountdown(ms) {
     }
   }
 }
-async function waitQueueTagWithTimeout(tag, ms = 8000) {
-  return Promise.race([
-    tmClient.waitQueueTag(tag),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`QueueTag ${tag} timeout`)), ms)
-    )
-  ])
-}
 app.post("/robot/run", async (req, res) => {
   const { points, speed = 30 } = req.body
 
@@ -290,7 +309,8 @@ app.post("/robot/run", async (req, res) => {
   if (tmClient.running) return res.status(400).json({ error: "Already running" })
   if (!points || points.length === 0) return res.status(400).json({ error: "No points selected" })
 
-  tagCounter = 0
+  saveTagCounter()  // persist before run so restart starts from fresh tags
+  if (tagCounter > 30000) tagCounter = 100
   tmClient.running = true
   robotPaused = false
   tmMonitor.currentLabel    = null
@@ -344,11 +364,10 @@ for (const pt of points) {
     if (tmClient.running) {
       const tSafe = ++tagCounter
       const safePos = `${POS_SAFE.x},${POS_SAFE.y},${POS_SAFE.z},${POS_SAFE.rx},${POS_SAFE.ry},${POS_SAFE.rz}`
-      await tmClient.sendScript(`safe${tSafe}`, [
+      await tmClient.sendScript(`safe${tSafe}`, tagWrap([
         `PTP("CPP",{${safePos}},${speed},0,0,false)`,
-        `QueueTag(${tSafe},1)`,
-      ])
-      await waitTagSafe(tSafe, 15000)
+      ]))
+      await waitTag(`safe${tSafe}`)
     }
 
     tmClient.running = false
@@ -458,38 +477,83 @@ app.post("/vision/trigger", async (req, res) => {
     res.status(500).json({ error: e.message })
   }
 })
-// ─── Tray pixel mapping ──────────────────────────────────────────────────────
-// Tọa độ robot gửi về là pixel của ảnh camera.
-// Điều chỉnh TRAY1_ORIGIN_X/Y và CELL_W/H theo camera thực tế.
-//
-// Cách xác định:
-//   1. Chạy vision → đọc GET /vision/debug → xem raw objects
-//   2. Đặt vật ở ô (1,1) (góc trên-trái tray1) → ghi lại x, y → đó là TRAY1_ORIGIN
-//   3. Đặt vật ở ô hàng kế (4 cols × 5 rows = 20 cells)
-//      → CELL_W = khoảng cách X giữa 2 ô liền nhau
-//      → CELL_H = khoảng cách Y giữa 2 ô liền nhau
+// ─── Tray pixel mapping — perspective homography ─────────────────────────────
+// 4 corner pixel positions đo thực tế từ ảnh camera (cell1, cell4, cell17, cell20)
 
-const TRAY1_ORIGIN_X = 441   // calibrated: cell1.x - CELL_W/2
-const TRAY1_ORIGIN_Y = 327   // calibrated: cell1.y - CELL_H/2
-const CELL_W = 291           // (cell20.x - cell1.x) / 3
-const CELL_H = 140           // (cell20.y - cell1.y) / 4
+const TRAY1_CAL_SRC = [
+  [ 543.1617,  605.4054],  // cell 1  → col=0, row=0
+  [1349.788,   652.3983],  // cell 4  → col=3, row=0
+  [ 501.77972, 1331.4283], // cell 17 → col=0, row=4
+  [1321.1007,  1367.9277], // cell 20 → col=3, row=4
+]
+const TRAY1_CAL_DST = [[0,0],[3,0],[0,4],[3,4]]
+
+// !! ĐIỀN VÀO: jog robot đến đúng 4 góc, đọc x,y tại mỗi góc (cùng thứ tự với TRAY1_CAL_SRC)
+const TRAY1_ROBOT_CORNERS = [
+  [613, 133 ],  // cell 1  — camera
+  [599, 15  ],  // cell 4  — camera
+  [507, 145 ],  // cell 17 — camera
+  [492, 26  ],  // cell 20 — camera
+]
+
+const TRAY1_ROBOT_CALIBRATED = TRAY1_ROBOT_CORNERS.some(([x, y]) => x !== 0 || y !== 0)
+
+const H_PIX_TO_ROBOT = TRAY1_ROBOT_CALIBRATED
+  ? computeHomography(TRAY1_CAL_SRC, TRAY1_ROBOT_CORNERS)
+  : null
+
+function pixelToRobot(px, py) {
+  if (!H_PIX_TO_ROBOT) return null
+  const res = applyHomography(H_PIX_TO_ROBOT, px, py)
+  return { x: +res.col.toFixed(2), y: +res.row.toFixed(2) }
+}
+
+function gaussSolve(A, b) {
+  const n = A.length
+  const M = A.map((row, i) => [...row, b[i]])
+  for (let col = 0; col < n; col++) {
+    let maxRow = col
+    for (let row = col + 1; row < n; row++)
+      if (Math.abs(M[row][col]) > Math.abs(M[maxRow][col])) maxRow = row
+    ;[M[col], M[maxRow]] = [M[maxRow], M[col]]
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue
+      const f = M[row][col] / M[col][col]
+      for (let j = col; j <= n; j++) M[row][j] -= f * M[col][j]
+    }
+  }
+  return M.map((row, i) => row[n] / row[i])
+}
+
+function computeHomography(srcPts, dstPts) {
+  const A = [], b = []
+  for (let i = 0; i < 4; i++) {
+    const [sx, sy] = srcPts[i], [dx, dy] = dstPts[i]
+    A.push([sx,sy,1,0,0,0,-sx*dx,-sy*dx]); b.push(dx)
+    A.push([0,0,0,sx,sy,1,-sx*dy,-sy*dy]); b.push(dy)
+  }
+  const h = gaussSolve(A, b)
+  return [[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]]
+}
+
+function applyHomography(H, px, py) {
+  const w = H[2][0]*px + H[2][1]*py + H[2][2]
+  return { col: (H[0][0]*px + H[0][1]*py + H[0][2])/w,
+           row: (H[1][0]*px + H[1][1]*py + H[1][2])/w }
+}
+
+const H_TRAY1 = computeHomography(TRAY1_CAL_SRC, TRAY1_CAL_DST)
 
 function mapToTray(objects) {
-  const result = {
-    tray1: [], tray2: [], tray3: [],
-    tray4: [], tray5: [], tray6: []
-  }
-
+  const result = { tray1: [], tray2: [], tray3: [], tray4: [], tray5: [], tray6: [] }
   objects.forEach(obj => {
-    const col = Math.floor((obj.x - TRAY1_ORIGIN_X) / CELL_W)
-    const row = Math.floor((obj.y - TRAY1_ORIGIN_Y) / CELL_H)
-
-    if (col >= 0 && col < 4 && row >= 0 && row < 5) {
-      const cell = row * 4 + col + 1
+    const { col, row } = applyHomography(H_TRAY1, obj.x, obj.y)
+    const c = Math.round(col), r = Math.round(row)
+    if (c >= 0 && c <= 3 && r >= 0 && r <= 4) {
+      const cell = r * 4 + c + 1
       if (!result.tray1.includes(cell)) result.tray1.push(cell)
     }
   })
-
   return result
 }
 app.get("/vision/debug", (req, res) => {
@@ -506,11 +570,20 @@ app.get("/vision/latest", (req, res) => {
     ? latestVision.occupied
     : mapToTray(objects)
 
+  const robotPoints = H_PIX_TO_ROBOT
+    ? objects.map((obj, i) => ({
+        label: `vision-${i + 1}`,
+        ...pixelToRobot(obj.x, obj.y),
+      }))
+    : []
+
   res.json({
     found: objects.length > 0,
     done: latestVision.done,
     objects,
     occupied,
+    robotPoints,
+    calibrated: TRAY1_ROBOT_CALIBRATED,
   })
 })
 
@@ -667,8 +740,9 @@ function autoConnectMonitor(ip) {
     })
 }
 
-async function runPointBatch(pt, speed) {
-  const lowerPt      = { ...pt,          z: pt.z          - LOWER_MM }
+async function runPointBatch(rawPt, speed) {
+  const pt           = { ...rawPt, z: TRAY_HOVER_Z, ...ORI }
+  const lowerPt      = { ...pt,    z: TRAY_PICK_Z }
   const lowerInspect = { ...POS_INSPECT, z: POS_INSPECT.z - LOWER_MM }
 
   function posStr(p) { return `${p.x},${p.y},${p.z},${p.rx},${p.ry},${p.rz}` }
@@ -679,31 +753,25 @@ async function runPointBatch(pt, speed) {
 
   // Script 1: pick (approach → down → up) → gripper close
   const t1 = ++tagCounter
-  let ok = await tmClient.sendScript(`s${t1}`, [
-    ptp(pt), ptp(lowerPt), ptp(pt), `QueueTag(${t1},1)`,
-  ])
+  let ok = await tmClient.sendScript(`s${t1}`, tagWrap([ptp(pt), ptp(lowerPt), ptp(pt)]))
   if (!ok) return false
-  await waitTagSafe(t1, 30000)
+  if (!await waitTag(`s${t1}`)) return false
   gripperOpen = false
   await waitIfPaused(); if (!tmClient.running) return false
 
   // Script 2: place to inspect (to inspect → down → up) → gripper open
   const t2 = ++tagCounter
-  ok = await tmClient.sendScript(`s${t2}`, [
-    ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT), `QueueTag(${t2},1)`,
-  ])
+  ok = await tmClient.sendScript(`s${t2}`, tagWrap([ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT)]))
   if (!ok) return false
-  await waitTagSafe(t2, 30000)
+  if (!await waitTag(`s${t2}`)) return false
   gripperOpen = true
   await waitIfPaused(); if (!tmClient.running) return false
 
   // Script 3: go to safe
   const t3 = ++tagCounter
-  ok = await tmClient.sendScript(`s${t3}`, [
-    ptp(POS_SAFE), `QueueTag(${t3},1)`,
-  ])
+  ok = await tmClient.sendScript(`s${t3}`, tagWrap([ptp(POS_SAFE)]))
   if (!ok) return false
-  await waitTagSafe(t3, 30000)
+  if (!await waitTag(`s${t3}`)) return false
 
   await waitWithCountdown(INSPECT_WAIT_MS)
   if (!tmClient.running) return false
@@ -711,21 +779,17 @@ async function runPointBatch(pt, speed) {
 
   // Script 4: pick lại từ inspect → gripper close
   const t4 = ++tagCounter
-  ok = await tmClient.sendScript(`s${t4}`, [
-    ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT), `QueueTag(${t4},1)`,
-  ])
+  ok = await tmClient.sendScript(`s${t4}`, tagWrap([ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT)]))
   if (!ok) return false
-  await waitTagSafe(t4, 30000)
+  if (!await waitTag(`s${t4}`)) return false
   gripperOpen = false
   await waitIfPaused(); if (!tmClient.running) return false
 
   // Script 5: trả về pt (to pt → down → up) → gripper open
   const t5 = ++tagCounter
-  ok = await tmClient.sendScript(`s${t5}`, [
-    ptp(pt), ptp(lowerPt), ptp(pt), `QueueTag(${t5},1)`,
-  ])
+  ok = await tmClient.sendScript(`s${t5}`, tagWrap([ptp(pt), ptp(lowerPt), ptp(pt)]))
   if (!ok) return false
-  await waitTagSafe(t5, 30000)
+  if (!await waitTag(`s${t5}`)) return false
   gripperOpen = true
 
   return true

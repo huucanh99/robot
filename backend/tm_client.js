@@ -90,17 +90,21 @@ class TMClient {
   // ── routing ─────────────────────────────────────────────────────────────
 
   _onData(data) {
-    this.buffer += data.toString("utf8")
+    const raw = data.toString("utf8")
+    console.log(`[RAW←] ${JSON.stringify(raw)}`)
+    this.buffer += raw
     while (this.buffer.includes("\r\n")) {
       const idx  = this.buffer.indexOf("\r\n")
       const line = this.buffer.slice(0, idx)
       this.buffer = this.buffer.slice(idx + 2)
       const pkt = parseLine(line)
       if (pkt) this._route(pkt)
+      else if (line.trim()) console.log(`[RAW←] unparse: ${JSON.stringify(line)}`)
     }
   }
 
   _route(pkt) {
+    console.log(`[PKT←] header=${pkt.header} data=${pkt.data}`)
     if (pkt.header === "TMSCT" || pkt.header === "CPERR") {
       if (this.tmsctWaiters.length > 0) {
         this.tmsctWaiters.shift()(pkt)
@@ -113,6 +117,8 @@ class TMClient {
       } else {
         this.tmstaQueue.push(pkt)
       }
+    } else {
+      console.log(`[PKT←] unknown header, dropped`)
     }
   }
 
@@ -185,9 +191,11 @@ class TMClient {
 
   // ── wait QueueTag ───────────────────────────────────────────────────────
 
-  async waitQueueTag(tagId, pollInterval = 100, maxWait = 60000) {
+  async waitQueueTag(tagId, pollInterval = 100, maxWait = 120000) {
     const deadline = Date.now() + maxWait
+    const start    = Date.now()
     console.log(`[Wait] QueueTag ${tagId}...`)
+    let lastLogSec = 0
     while (true) {
       if (!this.running)
         throw new Error(`QueueTag ${tagId} aborted`)
@@ -198,8 +206,14 @@ class TMClient {
       if (!resp) throw new Error(`QueueTag ${tagId} — không nhận được phản hồi TMSTA`)
       const parts = resp.data.split(",")
       if (parts.length >= 3 && parts[1] === String(tagId) && parts[2].toLowerCase() === "true") {
-        console.log(`[QueueTag ${tagId}] Done`)
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+        console.log(`[QueueTag ${tagId}] Done (${elapsed}s)`)
         return
+      }
+      const elapsedSec = Math.floor((Date.now() - start) / 1000)
+      if (elapsedSec > 0 && elapsedSec !== lastLogSec && elapsedSec % 5 === 0) {
+        console.log(`[QueueTag ${tagId}] still waiting... ${elapsedSec}s`)
+        lastLogSec = elapsedSec
       }
       await new Promise(r => setTimeout(r, pollInterval))
     }
