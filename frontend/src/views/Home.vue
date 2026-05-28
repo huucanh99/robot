@@ -397,6 +397,10 @@ mounted(){
     try {
       const r = await fetch(`${this.apiBase}/robot/position`)
       const data = await r.json()
+      if(this.isViewer && data.serverStart){
+        if(!this._serverStart) this._serverStart = data.serverStart
+        else if(this._serverStart !== data.serverStart) { window.location.reload(); return }
+      }
       this.pos = data
       this.isConnected = !!data.connected
       if(data.robotIp && !this.robotIP) this.robotIP = data.robotIp

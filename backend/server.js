@@ -16,6 +16,8 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+const SERVER_START_TIME = Date.now()
+
 const db = new sqlite3.Database("./database.db")
 
 const tmClient     = new TMClient()
@@ -259,6 +261,7 @@ app.get("/robot/position", (req, res) => {
     paused: robotPaused,
     waitingInspection,
     currentPoints,
+    serverStart: SERVER_START_TIME,
   })
 })
 
@@ -853,11 +856,15 @@ async function runPointBatch(rawPt, speed, currentCell = null) {
   ok = await tmClient.sendScript(`s${t3}`, tagWrap([ptp(POS_SAFE)]))
   if (!ok) { console.log('[S3] FAILED sendScript'); return false }
   if (!await waitTag(`s${t3}`)) { console.log('[S3] FAILED waitTag'); return false }
+  await new Promise(r => setTimeout(r, 2000))
+  waitingInspection = true
 
   const webhookOk = await sendWebhook("inspection_start", currentCell)
   if (!webhookOk) {
     console.warn("[webhook] failed — auto-continuing after 3s")
+    waitingInspection = true
     await new Promise(r => setTimeout(r, 3000))
+    waitingInspection = false
   } else {
     if (!await waitForContinue()) return false
   }

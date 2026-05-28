@@ -8,17 +8,21 @@ const PORT          = parseInt(process.env.PORT) || 8080
 
 app.post("/notify", async (req, res) => {
   const { event, currentCell, timestamp } = req.body
-  console.log(`[${new Date().toLocaleTimeString()}] event: ${event}`, currentCell || "")
+  const receiveTime = new Date()
+  console.log(`[${receiveTime.toLocaleTimeString()}] NHẬN LỆNH — event: ${event}`, currentCell || "")
   res.json({ ok: true })
 
   if (event === "inspection_start") {
     console.log(`  → đang scan... (${SCAN_DELAY_MS / 1000}s)`)
     await new Promise(r => setTimeout(r, SCAN_DELAY_MS))
 
+    const sendTime = new Date()
+    const elapsed = ((sendTime - receiveTime) / 1000).toFixed(1)
+    console.log(`  → [${sendTime.toLocaleTimeString()}] GỬI /robot/continue (sau ${elapsed}s)`)
     try {
       const resp = await fetch(`${ROBOT_URL}/robot/continue`, { method: "POST" })
       const body = await resp.json()
-      console.log(`  → gọi /robot/continue:`, body)
+      console.log(`  → kết quả:`, body)
     } catch (e) {
       console.error(`  → lỗi gọi /robot/continue:`, e.message)
     }
