@@ -144,6 +144,7 @@ class TMClient {
   }
 
   sendRaw(header, data) {
+    if (!this.socket) throw new Error('Socket disconnected')
     this.socket.write(buildPacket(header, data))
   }
 

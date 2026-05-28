@@ -4,10 +4,10 @@
 
 <div class="page-header">
 
-<p>配方設定</p>
+<p>{{ t('recipeTitle') }}</p>
 
-<button class="add-btn" @click="createRecipe">
-+ 新增配方
+<button class="add-btn" @click="createRecipe" :disabled="isViewer">
+{{ t('addRecipe') }}
 </button>
 
 </div>
@@ -20,8 +20,8 @@
 <div class="recipe-list">
 
 <div class="list-header">
-<span>名稱</span>
-<span>操作</span>
+<span>{{ t('colName') }}</span>
+<span>{{ t('colActions') }}</span>
 </div>
 
 
@@ -41,15 +41,17 @@ class="recipe-item"
 <button
 class="edit-btn"
 @click="editRecipe(recipe)"
+:disabled="isViewer"
 >
-編輯
+{{ t('editBtn') }}
 </button>
 
 <button
 class="delete-btn"
 @click="deleteRecipe(recipe.id)"
+:disabled="isViewer"
 >
-刪除
+{{ t('deleteBtn') }}
 </button>
 
 </div>
@@ -65,10 +67,10 @@ class="delete-btn"
 
 <div class="editor-header">
 
-<span>編輯配方</span>
+<span>{{ t('editorTitle') }}</span>
 
 <div class="edit-tag" v-if="editingId">
-編輯中
+{{ t('editingTag') }}
 </div>
 
 </div>
@@ -78,7 +80,7 @@ class="delete-btn"
 
 <div class="form-row">
 
-<label>配方名稱</label>
+<label>{{ t('fieldName') }}</label>
 
 <input
 class="full-input"
@@ -94,7 +96,7 @@ v-model="form.name"
 
 <div class="form-row">
 
-<label>手臂速度</label>
+<label>{{ t('fieldSpeed') }}</label>
 
 <div class="input-box">
 
@@ -109,7 +111,7 @@ v-model="form.name"
 
 <div class="form-row">
 
-<label>夾爪開關開度</label>
+<label>{{ t('fieldGrip') }}</label>
 
 <div class="input-box">
 
@@ -124,7 +126,7 @@ v-model="form.name"
 
 <div class="form-row">
 
-<label>夾爪預設開度</label>
+<label>{{ t('fieldOpen') }}</label>
 
 <div class="input-box">
 
@@ -137,36 +139,21 @@ v-model="form.name"
 </div>
 
 
-<div class="form-row">
-
-<label>等待秒數</label>
-
-<div class="input-box">
-
-<input v-model="form.wait"/>
-
-<span class="unit">sec</span>
-
-</div>
-
-</div>
-
-
 </div>
 
 
 <div class="button-bar">
 
-<button class="save-btn" @click="saveEdit">
-儲存
+<button class="save-btn" @click="saveEdit" :disabled="isViewer">
+{{ t('saveBtn') }}
 </button>
 
-<button class="cancel-btn" @click="cancelEdit">
-取消
+<button class="cancel-btn" @click="cancelEdit" :disabled="isViewer">
+{{ t('cancelBtn') }}
 </button>
 
-<button class="new-btn" @click="saveAsNew">
-另存新檔
+<button class="new-btn" @click="saveAsNew" :disabled="isViewer">
+{{ t('saveAsBtn') }}
 </button>
 
 </div>
@@ -184,7 +171,14 @@ v-model="form.name"
 
 <script>
 
+import { useLangStore } from '../stores/lang'
+import { mapState } from 'pinia'
+
 export default{
+
+computed: {
+  ...mapState(useLangStore, ['isViewer']),
+},
 
 data(){
 
@@ -201,7 +195,6 @@ name:"",
 speed:"",
 grip:"",
 open:"",
-wait:""
 }
 
 }
@@ -216,6 +209,7 @@ this.loadRecipes()
 
 methods:{
 
+t(key) { return useLangStore().t(key) },
 
 async loadRecipes(){
 
@@ -235,7 +229,6 @@ name:"",
 speed:"",
 grip:"",
 open:"",
-wait:""
 }
 
 },
@@ -263,7 +256,7 @@ r=>r.name===this.form.name && r.id!==this.editingId
 
 if(duplicated){
 
-this.nameError="配方名稱重複"
+this.nameError=this.t('errDuplicate')
 return
 
 }
@@ -282,7 +275,7 @@ body:JSON.stringify(this.form)
 
 await this.loadRecipes()
 
-alert("修改成功")
+alert(this.t('alertSaved'))
 
 },
 
@@ -293,12 +286,11 @@ const hasData=
 this.form.name ||
 this.form.speed ||
 this.form.grip ||
-this.form.open ||
-this.form.wait
+this.form.open
 
 if(hasData){
 
-const ok=confirm("確定取消嗎？資料會全部消失")
+const ok=confirm(this.t('confirmCancel'))
 
 if(!ok) return
 
@@ -319,7 +311,7 @@ r=>r.name===this.form.name
 
 if(duplicated){
 
-this.nameError="配方名稱重複"
+this.nameError=this.t('errDuplicate')
 return
 
 }
@@ -345,7 +337,7 @@ this.createRecipe()
 
 async deleteRecipe(id){
 
-const ok=confirm("確定刪除這個配方嗎？")
+const ok=confirm(this.t('confirmDelete'))
 
 if(!ok) return
 
@@ -545,6 +537,11 @@ background:white;
 color:#1e6bd6;
 padding:14px;
 cursor:pointer;
+}
+
+button:disabled {
+opacity: 0.4;
+cursor: not-allowed;
 }
 
 </style>

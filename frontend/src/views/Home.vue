@@ -2,21 +2,31 @@
 
 <div class="home">
 
+  <!-- VIEWER MODE BANNER -->
+  <div v-if="isViewer" class="viewer-banner">{{ t('viewerBanner') }}</div>
+
+  <!-- WAITING INSPECTION BANNER -->
+  <div v-if="waitingInspection" class="inspect-banner">{{ t('inspectBanner') }}</div>
+
   <!-- TOP BAR -->
   <div class="top-bar">
 
     <div class="left">
 
-      <label>手臂 IP</label>
+      <label>{{ t('armIp') }}</label>
       <input type="text" v-model="robotIP"/>
 
-      <button class="connect-btn" @click="connectRobot">{{ isConnected ? "斷線" : "連線" }}</button>
+      <button class="connect-btn" @click="connectRobot" :disabled="isViewer">{{ isConnected ? t('disconnect') : t('connect') }}</button>
+
+      <button class="viewer-toggle-btn" @click="toggleViewer" :class="{ active: isViewer }">
+        {{ isViewer ? t('viewerMode') : t('controlMode') }}
+      </button>
 
       <div class="divider"></div>
 
-      <label>配方</label>
+      <label>{{ t('recipe') }}</label>
 
-      <select>
+      <select :disabled="isViewer">
         <option
           v-for="recipe in recipes"
           :key="recipe.id"
@@ -28,9 +38,15 @@
 
     </div>
 
-    <div class="status-box" :class="{ connected: isConnected, disconnected: !isConnected }">
-      <div class="status-dot" :class="{ connected: isConnected, disconnected: !isConnected }"></div>
-      <span>{{ isConnected ? "已連線" : "未連線" }}</span>
+    <div class="right-bar">
+      <div class="lang-switcher">
+        <button :class="{ active: lang === 'zh' }" @click="setLang('zh')">简体</button>
+        <button :class="{ active: lang === 'en' }" @click="setLang('en')">EN</button>
+      </div>
+      <div class="status-box" :class="{ connected: isConnected, disconnected: !isConnected }">
+        <div class="status-dot" :class="{ connected: isConnected, disconnected: !isConnected }"></div>
+        <span>{{ isConnected ? t('connected') : t('disconnected') }}</span>
+      </div>
     </div>
 
   </div>
@@ -43,7 +59,7 @@
       <div class="workstation">
 
         <div class="title-worksation">
-          <h4>工作台俯視圖</h4>
+          <h4>{{ t('workstation') }}</h4>
         </div>
 
         <div class="robot-map">
@@ -78,8 +94,8 @@
                 <div class="g-jaw g-right" :class="{ open: gripperOpen }"></div>
               </div>
               <div class="gripper-info">
-                <span class="gripper-label">夾爪</span>
-                <span class="gripper-state">{{ gripperOpen ? '開啟' : '閉合' }}</span>
+                <span class="gripper-label">{{ t('gripper') }}</span>
+                <span class="gripper-state">{{ gripperOpen ? t('gripperOpen') : t('gripperClosed') }}</span>
                 <span v-if="countdown > 0" class="gripper-countdown">{{ countdown }}s</span>
               </div>
             </div>
@@ -95,19 +111,19 @@
 
               <div class="robot-area">
                 <div class="robot-arm">
-                  <div class="robot-inner">手臂</div>
+                  <div class="robot-inner">{{ t('arm') }}</div>
                 </div>
               </div>
 
               <div class="tray">
-                <div class="tray-title">載盤 1</div>
+                <div class="tray-title">{{ t('tray') }} 1</div>
                 <div class="tray-grid">
                   <div
                     v-for="n in 20"
                     :key="'tray1-'+n"
                     class="tray-cell"
                     :class="cellClass('tray1', n)"
-                    @click="toggleCell('tray1',n)"
+                    @click="!isViewer && toggleCell('tray1',n)"
                   >
                     <span v-if="orders.tray1[n]" class="order-number">
                       {{ orders.tray1[n] }}
@@ -123,14 +139,14 @@
             <div class="middle-area">
 
               <div class="tray">
-                <div class="tray-title">載盤 4</div>
+                <div class="tray-title">{{ t('tray') }} 4</div>
                 <div class="tray-grid">
                   <div
                     v-for="n in 20"
                     :key="'tray4-'+n"
                     class="tray-cell"
                     :class="cellClass('tray4', n)"
-                    @click="toggleCell('tray4',n)"
+                    @click="!isViewer && toggleCell('tray4',n)"
                   >
                     <span v-if="orders.tray4[n]" class="order-number">
                       {{ orders.tray4[n] }}
@@ -140,14 +156,14 @@
               </div>
 
               <div class="tray">
-                <div class="tray-title">載盤 2</div>
+                <div class="tray-title">{{ t('tray') }} 2</div>
                 <div class="tray-grid">
                   <div
                     v-for="n in 20"
                     :key="'tray2-'+n"
                     class="tray-cell"
                     :class="cellClass('tray2', n)"
-                    @click="toggleCell('tray2',n)"
+                    @click="!isViewer && toggleCell('tray2',n)"
                   >
                     <span v-if="orders.tray2[n]" class="order-number">
                       {{ orders.tray2[n] }}
@@ -163,14 +179,14 @@
             <div class="right-area">
 
               <div class="tray">
-                <div class="tray-title">載盤 6</div>
+                <div class="tray-title">{{ t('tray') }} 6</div>
                 <div class="tray-grid">
                   <div
                     v-for="n in 20"
                     :key="'tray6-'+n"
                     class="tray-cell"
                     :class="cellClass('tray6', n)"
-                    @click="toggleCell('tray6',n)"
+                    @click="!isViewer && toggleCell('tray6',n)"
                   >
                     <span v-if="orders.tray6[n]" class="order-number">
                       {{ orders.tray6[n] }}
@@ -180,14 +196,14 @@
               </div>
 
               <div class="tray">
-                <div class="tray-title">載盤 5</div>
+                <div class="tray-title">{{ t('tray') }} 5</div>
                 <div class="tray-grid">
                   <div
                     v-for="n in 20"
                     :key="'tray5-'+n"
                     class="tray-cell"
                     :class="cellClass('tray5', n)"
-                    @click="toggleCell('tray5',n)"
+                    @click="!isViewer && toggleCell('tray5',n)"
                   >
                     <span v-if="orders.tray5[n]" class="order-number">
                       {{ orders.tray5[n] }}
@@ -197,14 +213,14 @@
               </div>
 
               <div class="tray">
-                <div class="tray-title">載盤 3</div>
+                <div class="tray-title">{{ t('tray') }} 3</div>
                 <div class="tray-grid">
                   <div
                     v-for="n in 20"
                     :key="'tray3-'+n"
                     class="tray-cell"
                     :class="cellClass('tray3', n)"
-                    @click="toggleCell('tray3',n)"
+                    @click="!isViewer && toggleCell('tray3',n)"
                   >
                     <span v-if="orders.tray3[n]" class="order-number">
                       {{ orders.tray3[n] }}
@@ -228,13 +244,13 @@
         <div class="camera-panel">
 
           <div class="camera-title">
-            即時影像
+            {{ t('liveView') }}
           </div>
 
           <div class="camera-view">
 
             <div v-if="capturing" class="scan-progress">
-              取樣中... {{ capturedImages.filter(x => x).length }} / 6
+              {{ t('scanning') }} {{ capturedImages.filter(x => x).length }} / 6
             </div>
 
             <div class="image-grid">
@@ -255,17 +271,17 @@
 
 
         <!-- CONTROL BUTTONS -->
-        <div class="controls">
+        <div class="controls" v-if="!isViewer">
 
-          <button class="btn sample" @click="captureImage" :disabled="capturing">取樣</button>
+          <button class="btn sample" @click="captureImage" :disabled="capturing">{{ t('capture') }}</button>
 
           <button class="btn start" @click="startRun" :disabled="isRunning && !isPaused">
-            {{ isPaused ? '繼續' : '開始' }}
+            {{ isPaused ? t('resume') : t('start') }}
           </button>
 
-          <button class="btn pause" @click="pauseRun" :disabled="!isRunning || isPaused">暫停</button>
+          <button class="btn pause" @click="pauseRun" :disabled="!isRunning || isPaused">{{ t('pause') }}</button>
 
-          <button class="btn stop" @click="stopRun">停止 / 重置</button>
+          <button class="btn stop" @click="stopRun">{{ t('stop') }}</button>
 
         </div>
 
@@ -274,7 +290,7 @@
 
     <div class="status-panel">
       <div class="status-title">
-        錯誤 / 狀態訊息
+        {{ t('statusTitle') }}
       </div>
       <div class="status-content">
         <div
@@ -296,10 +312,10 @@
 
 // 4 góc tray 1 — tọa độ robot đo thực tế (camera TCP, cùng approach height)
 const TRAY1_CORNERS = {
-  tl: { x: 613,   y: 133   },  // cell 1  (col=0, row=0)
-  tr: { x: 599,   y: 15    },  // cell 4  (col=3, row=0)
-  bl: { x: 507,   y: 145   },  // cell 17 (col=0, row=4)
-  br: { x: 492,   y: 26    },  // cell 20 (col=3, row=4)
+  tl: { x: 565, y: 272 },  // cell 1  (col=0, row=0)
+  tr: { x: 561, y: 153 },  // cell 4  (col=3, row=0)
+  bl: { x: 457, y: 274 },  // cell 17 (col=0, row=4)
+  br: { x: 447, y: 156 },  // cell 20 (col=3, row=4)
 }
 
 function getCellCoords(tray, cell) {
@@ -313,7 +329,7 @@ function getCellCoords(tray, cell) {
     const { tl, tr, bl, br } = TRAY1_CORNERS
     const x = (1-s)*(1-t)*tl.x + s*(1-t)*tr.x + (1-s)*t*bl.x + s*t*br.x
     const y = (1-s)*(1-t)*tl.y + s*(1-t)*tr.y + (1-s)*t*bl.y + s*t*br.y
-    return { x: +x.toFixed(2), y: +y.toFixed(2) }
+    return { x: +x.toFixed(2), y: +y.toFixed(2), z: 80, rx: 180, ry: 0, rz: 90 }
   }
 
   // Trays chưa calibrate — placeholder
@@ -325,7 +341,15 @@ function getCellCoords(tray, cell) {
   return { x: base.x - row * 50, y: base.y - col * 50 }
 }
 
+import { useLangStore } from '../stores/lang'
+import { mapState } from 'pinia'
+
 export default {
+
+computed: {
+  ...mapState(useLangStore, ['lang', 'isViewer']),
+  apiBase() { return `http://${window.location.hostname}:3000` },
+},
 
 data(){
   return {
@@ -341,6 +365,7 @@ data(){
     },
     pos: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
     posTimer: null,
+    camTimer: null,
     runningLabel: null,
     processingLabel: null,
     doneLabels: [],
@@ -358,16 +383,80 @@ data(){
     visionObjects: [],
     visionRobotPoints: [],
     visionCalibrated: false,
+    waitingInspection: false,
   }
 },
 
 mounted(){
-  fetch("http://localhost:3000/recipes")
+  fetch(`${this.apiBase}/recipes`)
     .then(res => res.json())
     .then(data => { this.recipes = data })
+
+
+  this.posTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`${this.apiBase}/robot/position`)
+      const data = await r.json()
+      this.pos = data
+      this.isConnected = !!data.connected
+      if(data.robotIp && !this.robotIP) this.robotIP = data.robotIp
+      if(data.currentLabel      !== undefined) this.runningLabel      = data.currentLabel
+      if(data.processingLabel   !== undefined) this.processingLabel   = data.processingLabel
+      if(Array.isArray(data.doneLabels))       this.doneLabels        = data.doneLabels
+      if(data.gripperOpen       !== undefined) this.gripperOpen       = data.gripperOpen
+      if(data.countdown         !== undefined) this.countdown         = data.countdown
+      if(data.running           !== undefined) this.isRunning         = data.running
+      if(data.paused            !== undefined) this.isPaused          = data.paused
+      if(data.waitingInspection !== undefined) this.waitingInspection = data.waitingInspection
+      if(data.running && Array.isArray(data.currentPoints)){
+        const orders = { tray1:{}, tray2:{}, tray3:{}, tray4:{}, tray5:{}, tray6:{} }
+        data.currentPoints.forEach((pt, i) => {
+          const m = pt.label && pt.label.match(/^(tray\d+)-(\d+)$/)
+          if(m) orders[m[1]][m[2]] = i + 1
+        })
+        this.orders = orders
+      }
+
+      const vr = await fetch(`${this.apiBase}/vision/latest`)
+      const vd = await vr.json()
+      if(vd){
+        this.visionObjects = vd.objects || []
+        if(vd.occupied) this.occupiedCells.tray1 = vd.occupied.tray1 || []
+        this.visionRobotPoints = vd.robotPoints || []
+        this.visionCalibrated  = vd.calibrated  || false
+        this.drawCanvas()
+      }
+    } catch(e) {}
+  }, 300)
+
+  if(this.isViewer){
+    this.camTimer = setInterval(async () => {
+      try {
+        const camRes = await fetch(`${this.apiBase}/camera/latest`)
+        const camData = await camRes.json()
+        if(camData.image && camData.image !== this.capturedImages[0]){
+          this.capturedImages[0] = camData.image
+          this._origWidth  = camData.origWidth  || 0
+          this._origHeight = camData.origHeight || 0
+          this._cachedImg  = null
+          await this.$nextTick()
+          this.drawCanvas()
+        }
+      } catch(e) {}
+    }, 2000)
+  }
 },
 
 methods:{
+
+  t(key) { return useLangStore().t(key) },
+
+  setLang(l)     { useLangStore().setLang(l) },
+  toggleViewer() {
+    const store = useLangStore()
+    store.isViewer = !store.isViewer
+    localStorage.setItem('isViewer', store.isViewer)
+  },
 
   log(text, type = "info"){
     this.statusLog.unshift({ text, type })
@@ -375,10 +464,10 @@ methods:{
   },
 
   async connectRobot(){
-    if(!this.robotIP){ alert("請輸入機器手臂 IP"); return }
+    if(!this.robotIP){ alert(this.t('alertIp')); return }
     const action = this.isConnected ? "disconnect" : "connect"
 
-    const res = await fetch(`http://localhost:3000/robot/${action}`, {
+    const res = await fetch(`${this.apiBase}/robot/${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ip: this.robotIP })
@@ -390,25 +479,12 @@ methods:{
       this.isConnected = !this.isConnected
 
       if(this.isConnected){
-        this.log(`已連線到手臂 ${this.robotIP}`, "ok")
-        this.posTimer = setInterval(async ()=>{
-          const r = await fetch("http://localhost:3000/robot/position")
-          const data = await r.json()
-          this.pos = data
-          if(data.currentLabel    !== undefined) this.runningLabel    = data.currentLabel
-          if(data.processingLabel !== undefined) this.processingLabel = data.processingLabel
-          if(Array.isArray(data.doneLabels)) this.doneLabels = data.doneLabels
-          if(data.gripperOpen !== undefined) this.gripperOpen = data.gripperOpen
-          if(data.countdown   !== undefined) this.countdown   = data.countdown
-          if(data.running     !== undefined) this.isRunning   = data.running
-          if(data.paused      !== undefined) this.isPaused    = data.paused
-        },300)
+        this.log(this.t('logConnected')(this.robotIP), "ok")
       }else{
-        clearInterval(this.posTimer)
-        this.log("已斷線", "error")
+        this.log(this.t('logDisconnected'), "error")
       }
     } else {
-      this.log(`${action === "connect" ? "連線" : "斷線"}失敗: ${data.error || "未知錯誤"}`, "error")
+      this.log(this.t('logConnFail')(action, data.error || ""), "error")
     }
   },
 
@@ -416,26 +492,26 @@ methods:{
 
     if(this.capturing) return
     if(!this.isConnected){
-      this.log("請先連線機器手臂", "error")
+      this.log(this.t('logNeedConnect'), "error")
       return
     }
 
     this.capturing      = true
     this.visionObjects  = []
     this.capturedImages = [null]
-    this.log("開始取樣...", "info")
+    this.log(this.t('logStartScan'), "info")
 
     // 1. Reset data cũ + trigger robot chạy vision node
-    await fetch("http://localhost:3000/vision/reset", { method: "POST" })
+    await fetch(`${this.apiBase}/vision/reset`, { method: "POST" })
 
-    const trigRes  = await fetch("http://localhost:3000/vision/trigger", { method: "POST" })
+    const trigRes  = await fetch(`${this.apiBase}/vision/trigger`, { method: "POST" })
     const trigData = await trigRes.json()
     if(!trigData.success){
-      this.log("視覺觸發失敗: " + (trigData.error || ""), "error")
+      this.log(this.t('logTrigFail')(trigData.error || ""), "error")
       this.capturing = false
       return
     }
-    this.log("已觸發，等待座標...", "info")
+    this.log(this.t('logTriggered'), "info")
 
     // 2. Poll tọa độ robot gửi về qua TCP port 8765 (tối đa 30s)
     let result = null
@@ -443,9 +519,9 @@ methods:{
     for(let i = 0; i < MAX_WAIT * 2; i++){
       await new Promise(r => setTimeout(r, 500))
       const elapsed = Math.floor(i / 2) + 1
-      if(elapsed % 5 === 0) this.log(`等待中... ${elapsed}s`, "info")
+      if(elapsed % 5 === 0) this.log(this.t('logWaiting')(elapsed), "info")
 
-      const vr = await fetch("http://localhost:3000/vision/latest")
+      const vr = await fetch(`${this.apiBase}/vision/latest`)
       const d  = await vr.json()
       if(d && d.done){
         result = d
@@ -454,12 +530,12 @@ methods:{
     }
 
     if(!result){
-      this.log(`超時 ${MAX_WAIT}s — 未收到座標資料`, "error")
+      this.log(this.t('logTimeout')(MAX_WAIT), "error")
       this.capturing = false
       return
     }
 
-    this.log(`偵測到 ${result.objects.length} 個物件`, "ok")
+    this.log(this.t('logDetected')(result.objects.length), "ok")
     this.visionObjects        = result.objects
     this.occupiedCells.tray1  = result.occupied.tray1 || []
     this.visionRobotPoints    = result.robotPoints || []
@@ -473,56 +549,90 @@ methods:{
 
     // 3. Chụp ảnh để hiển thị + vẽ dot
     try {
-      const camRes  = await fetch("http://localhost:3000/camera/capture")
+      const camRes  = await fetch(`${this.apiBase}/camera/capture`)
       const camData = await camRes.json()
       if(camData.image){
         this.capturedImages[0] = camData.image
         await this.$nextTick()
         this.drawCanvas()
+        // resize và gửi thumbnail nhỏ lên server cho máy quan sát
+        const { thumb, origWidth, origHeight } = await this.resizeImage(camData.image, 800)
+        fetch(`${this.apiBase}/camera/thumbnail`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: thumb, origWidth, origHeight })
+        }).catch(() => {})
       }
     } catch(_) {}
 
     this.capturing = false
   },
 
-  drawCanvas(){
-    const canvas = this.$refs.camCanvas
-    if(!canvas || !this.capturedImages[0]) return
-
-    const img = new Image()
-    img.onload = () => {
-      canvas.width  = img.naturalWidth
-      canvas.height = img.naturalHeight
-
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(img, 0, 0)
-
-      for(const obj of this.visionObjects){
-        const radius = obj.r > 0 ? obj.r : 20
-        ctx.beginPath()
-        ctx.arc(obj.x, obj.y, radius, 0, Math.PI * 2)
-        ctx.strokeStyle = '#ff2200'
-        ctx.lineWidth   = 4
-        ctx.stroke()
-        ctx.fillStyle = 'rgba(255, 34, 0, 0.25)'
-        ctx.fill()
+  resizeImage(dataUrl, maxWidth){
+    return new Promise(resolve => {
+      const img = new Image()
+      img.onload = () => {
+        const origWidth = img.naturalWidth
+        const origHeight = img.naturalHeight
+        const scale = Math.min(1, maxWidth / origWidth)
+        const w = Math.round(origWidth  * scale)
+        const h = Math.round(origHeight * scale)
+        const c = document.createElement('canvas')
+        c.width = w; c.height = h
+        c.getContext('2d').drawImage(img, 0, 0, w, h)
+        resolve({ thumb: c.toDataURL('image/jpeg', 0.75), origWidth, origHeight })
       }
+      img.onerror = () => resolve({ thumb: dataUrl, origWidth: 0, origHeight: 0 })
+      img.src = dataUrl
+    })
+  },
+
+  _drawOnCanvas(){
+    const canvas = this.$refs.camCanvas
+    if(!canvas || !this._cachedImg) return
+    const img = this._cachedImg
+    canvas.width  = img.naturalWidth
+    canvas.height = img.naturalHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0)
+    const sx = (this._origWidth  > 0) ? img.naturalWidth  / this._origWidth  : 1
+    const sy = (this._origHeight > 0) ? img.naturalHeight / this._origHeight : 1
+    for(const obj of this.visionObjects){
+      const radius = (Math.abs(obj.r) > 10 ? Math.abs(obj.r) : 30) * sx
+      ctx.beginPath()
+      ctx.arc(obj.x * sx, obj.y * sy, radius, 0, Math.PI * 2)
+      ctx.strokeStyle = '#ff2200'
+      ctx.lineWidth   = 4
+      ctx.stroke()
+      ctx.fillStyle = 'rgba(255, 34, 0, 0.25)'
+      ctx.fill()
     }
-    img.src = this.capturedImages[0]
+  },
+
+  drawCanvas(){
+    const src = this.capturedImages[0]
+    if(!src) return
+    if(this._cachedImg && this._cachedImg.src === src){
+      this._drawOnCanvas()
+      return
+    }
+    const img = new Image()
+    img.onload = () => { this._cachedImg = img; this._drawOnCanvas() }
+    img.src = src
   },
 
   async startRun(){
     if(!this.isConnected){
-      this.log("請先連線機器手臂", "error")
+      this.log(this.t('logNeedConnect'), "error")
       return
     }
 
     // Resume nếu đang tạm dừng
     if(this.isPaused){
-      const res = await fetch("http://localhost:3000/robot/resume", { method: "POST" })
+      const res = await fetch(`${this.apiBase}/robot/resume`, { method: "POST" })
       const data = await res.json()
-      if(data.success) this.log("繼續執行", "ok")
-      else this.log("繼續失敗: " + (data.error || ""), "error")
+      if(data.success) this.log(this.t('logResumed'), "ok")
+      else this.log(this.t('logResumeFail')(data.error || ""), "error")
       return
     }
 
@@ -540,48 +650,48 @@ methods:{
       }
       points.sort((a, b) => a._order - b._order)
       payload = points.map(({ _order, ...p }) => p)
-      this.log(`手動模式: ${payload.length} 個格位`, "info")
+      this.log(this.t('logManual')(payload.length), "info")
     } else if(this.visionCalibrated && this.visionRobotPoints.length > 0){
       payload = this.visionRobotPoints
-      this.log(`Vision 自動模式: ${payload.length} 個物件`, "info")
+      this.log(this.t('logVision')(payload.length), "info")
     } else {
-      this.log("請先取樣或選擇格位", "error")
+      this.log(this.t('logNeedScan'), "error")
       return
     }
 
-    this.log(`開始執行 ${payload.length} 個格位...`, "info")
+    this.log(this.t('logRunning')(payload.length), "info")
     this.doneLabels  = []
     this.runningLabel = null
 
-    const res = await fetch("http://localhost:3000/robot/run", {
+    const res = await fetch(`${this.apiBase}/robot/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ points: payload, speed: 30 })
+      body: JSON.stringify({ points: payload, speed: 40 })
     })
 
     const data = await res.json()
     if(data.success){
-      this.log("執行完成 ✓", "ok")
+      this.log(this.t('logDone'), "ok")
     } else {
-      this.log("執行失敗: " + (data.error || ""), "error")
+      this.log(this.t('logRunFail')(data.error || ""), "error")
     }
   },
 
   async pauseRun(){
-    const res = await fetch("http://localhost:3000/robot/pause", { method: "POST" })
+    const res = await fetch(`${this.apiBase}/robot/pause`, { method: "POST" })
     const data = await res.json()
-    if(data.success) this.log("已暫停 — 按開始繼續", "info")
-    else this.log("暫停失敗: " + (data.error || ""), "error")
+    if(data.success) this.log(this.t('logPaused'), "info")
+    else this.log(this.t('logPauseFail')(data.error || ""), "error")
   },
 
   async stopRun(){
-    await fetch("http://localhost:3000/robot/stop", { method: "POST" })
+    await fetch(`${this.apiBase}/robot/stop`, { method: "POST" })
     this.isPaused    = false
     this.isRunning   = false
     this.doneLabels  = []
     this.runningLabel    = null
     this.processingLabel = null
-    this.log("已停止並重置", "error")
+    this.log(this.t('logStopped'), "error")
   },
 
   toggleCell(tray, n){
@@ -632,6 +742,49 @@ methods:{
 
 
 <style scoped>
+* { box-sizing: border-box; }
+
+.viewer-toggle-btn {
+  width: 120px; height: 36px; line-height: 32px;
+  font-size: 0.85rem; font-weight: 600; white-space: nowrap;
+  text-align: center; overflow: hidden;
+  border: 2px solid #6b7280; background: transparent; color: #374151; cursor: pointer;
+  transition: background 0.2s, color 0.2s, transform 0.1s;
+}
+.viewer-toggle-btn:active { transform: scale(0.92); }
+.viewer-toggle-btn.active {
+  border-color: #1e40af; background: #1e40af; color: #fff;
+}
+.viewer-banner {
+  background: #1e40af; color: #fff;
+  text-align: center; padding: 8px; font-weight: 600; font-size: 0.9rem;
+}
+.inspect-banner {
+  background: #f59e0b; color: #1a1a1a;
+  text-align: center; padding: 8px; font-weight: 600; font-size: 0.9rem;
+  animation: pulse 1.5s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+
+.right-bar {
+  display: flex; align-items: center; gap: 10px; padding-right: 20px;
+}
+.lang-switcher {
+  display: flex; border: 1px solid #ddd; border-radius: 6px; overflow: hidden;
+}
+.lang-switcher button {
+  padding: 0 12px; height: 32px; line-height: 32px;
+  border: none; background: #f5f5f5; color: #555;
+  font-size: 0.82rem; font-weight: 600; cursor: pointer; white-space: nowrap;
+  transition: background 0.2s, color 0.2s, transform 0.1s;
+}
+.lang-switcher button:active {
+  transform: scale(0.92);
+}
+.lang-switcher button.active {
+  background: #1e40af; color: #fff;
+}
+
 
 /* TOP BAR */
 
@@ -641,7 +794,13 @@ methods:{
  align-items:center;
  border-bottom:1px solid #dcdcdc;
  font-size:14px;
- padding:10px 0;
+ line-height:1;
+ height:56px;
+ min-height:56px;
+ max-height:56px;
+ padding:0;
+ box-sizing:border-box;
+ overflow:hidden;
 }
 
 .left{
@@ -651,17 +810,33 @@ methods:{
  padding-left:25px;
 }
 
+.left > label {
+ white-space:nowrap;
+ min-width:60px;
+}
+
 .top-bar input{
- padding:9px 10px;
+ padding:0 10px;
+ height:36px;
  border:1px solid #ccc;
+ box-sizing:border-box;
 }
 
 .connect-btn{
  background:#1e6bd6;
  color:white;
  border:none;
- padding:9px 25px;
+ padding:0;
+ width:110px;
+ height:36px;
+ line-height:36px;
+ text-align:center;
  cursor:pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .divider{
@@ -672,8 +847,11 @@ methods:{
 }
 
 .top-bar select{
- padding:9px 15px;
+ padding:0 8px;
+ height:36px;
+ width:160px;
  margin-left:10px;
+ box-sizing:border-box;
 }
 
 
@@ -682,8 +860,11 @@ methods:{
 .status-box{
  display:flex;
  align-items:center;
+ justify-content:center;
  gap:8px;
- padding:5px 12px;
+ padding:0;
+ width:130px;
+ height:36px;
  margin-right:15px;
  border:2px solid #999;
  background:#eeeeee;
@@ -766,15 +947,18 @@ methods:{
 
 .workstation{
  border:1px solid #ccc;
- width: 37%;
+ width: %;
 }
 
 .title-worksation h4{
- padding:5px 20px;
+ height:32px;
+ line-height:32px;
+ padding:0 20px;
  margin:0;
  border-bottom:1px solid #ccc;
  background:#f2f4f7;
  font-weight:500;
+ overflow:hidden;
 }
 
 .robot-map{
@@ -996,7 +1180,7 @@ input:checked + .slider:before{
 /* TRAY */
 
 .tray{
-  width: 160px;
+  width: 130px;
   border: 2.5px solid #b8c1cc;
   background: white;
   padding: 4px 1px;
@@ -1005,8 +1189,11 @@ input:checked + .slider:before{
 .tray-title{
  color:#1e6bd6;
  font-weight:600;
+ height:24px;
+ line-height:24px;
  margin-bottom:5px;
- padding-left: 10px;
+ padding-left:10px;
+ overflow:hidden;
 }
 
 .tray-grid{
@@ -1068,10 +1255,13 @@ input:checked + .slider:before{
 }
 
 .camera-title{
- padding:5px 15px;
+ height:32px;
+ line-height:32px;
+ padding:0 15px;
  border-bottom:1px solid #bfc7cf;
  font-weight:600;
  background:#dfe3e8;
+ overflow:hidden;
 }
 
 .camera-view{
@@ -1128,12 +1318,14 @@ input:checked + .slider:before{
 
 .btn{
  flex:1;
- padding:18px;
+ height:58px;
+ padding:0 18px;
  font-size:18px;
  font-weight:500;
  border:none;
  color:white;
  cursor:pointer;
+ white-space:nowrap;
 }
 
 .sample{
