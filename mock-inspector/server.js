@@ -19,12 +19,21 @@ app.post("/notify", async (req, res) => {
     const sendTime = new Date()
     const elapsed = ((sendTime - receiveTime) / 1000).toFixed(1)
     console.log(`  → [${sendTime.toLocaleTimeString()}] GỬI /robot/continue (sau ${elapsed}s)`)
-    try {
-      const resp = await fetch(`${ROBOT_URL}/robot/continue`, { method: "POST" })
-      const body = await resp.json()
-      console.log(`  → kết quả:`, body)
-    } catch (e) {
-      console.error(`  → lỗi gọi /robot/continue:`, e.message)
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const resp = await fetch(`${ROBOT_URL}/robot/continue`, {
+          method: "POST",
+          signal: AbortSignal.timeout(5000),
+        })
+        const body = await resp.json()
+        console.log(`  → kết quả [lần ${attempt}]:`, body)
+        if (resp.ok) break
+        console.warn(`  → thất bại (${resp.status}), thử lại sau 2s...`)
+      } catch (e) {
+        console.error(`  → lỗi [lần ${attempt}]:`, e.message)
+      }
+      if (attempt < 3) await new Promise(r => setTimeout(r, 2000))
     }
   }
 })

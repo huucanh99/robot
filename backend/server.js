@@ -219,6 +219,7 @@ app.post("/robot/connect", async (req, res) => {
     tmClient.ip = ip
     await tmClient.connect()
     await tmClient.waitForListenNode()
+    sendWebhook("arm_ready")
     res.json({ success: true })
   } catch (e) {
     tmClient.disconnect()
@@ -305,14 +306,17 @@ async function waitIfPaused() {
     await new Promise(r => setTimeout(r, 200))
   }
 }
-async function sendWebhook(event, cell = null) {
+async function sendWebhook(event, cell = null, message = null) {
   const url = process.env.WEBHOOK_URL
   if (!url) return true
   try {
+    const body = { event, timestamp: new Date().toISOString() }
+    if (cell)    body.currentCell = cell
+    if (message) body.message     = message
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event, currentCell: cell, timestamp: new Date().toISOString() }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
     })
     return true
@@ -332,6 +336,11 @@ async function waitForContinue() {
     }
   }, INSPECT_TIMEOUT_MS)
 
+  const warnDelay = INSPECT_TIMEOUT_MS - 120000
+  const warnId = warnDelay > 0 ? setTimeout(() => {
+    sendWebhook("inspection_timeout_warning")
+  }, warnDelay) : null
+
   const timerInterval = setInterval(() => {
     if (!robotPaused && inspectCountdown > 0) inspectCountdown--
   }, 1000)
@@ -341,6 +350,7 @@ async function waitForContinue() {
   })
 
   clearTimeout(timeoutId)
+  if (warnId) clearTimeout(warnId)
   clearInterval(timerInterval)
   waitingInspection = false
   continueResolve   = null
@@ -418,9 +428,11 @@ for (const pt of points) {
     }
 
     tmClient.running = false
+    sendWebhook("sequence_complete")
     res.json({ success: true })
   } catch (e) {
     tmClient.running = false
+    sendWebhook("error", null, e.message)
     try {
       if (tmClient.connected) await tmClient.sendScript("abort", ["StopAndClearBuffer(0)"])
     } catch (_) {}

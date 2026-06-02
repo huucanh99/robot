@@ -10,7 +10,15 @@
       "Bash(npm install:*)",
       "Bash(node -e ':*)",
       "Bash(ipconfig)",
-      "Bash(chcp:*)"
+      "Bash(chcp:*)",
+      "Bash(xargs grep *)",
+      "Bash(npx vite *)",
+      "Bash(node server.js)",
+      "Bash(taskkill *)",
+      "Bash(grep *)",
+      "Bash(node -e \"require\\('dotenv'\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
