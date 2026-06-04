@@ -2,6 +2,17 @@
 
 <div class="home">
 
+  <!-- CRITICAL ERROR BANNER -->
+  <div v-if="criticalError" class="critical-banner">{{ t('criticalBanner') }}</div>
+
+  <!-- ROBOT WARNING BANNER -->
+  <div v-if="robotWarning && !criticalError" class="robot-warning-banner" @click="robotWarning = null">{{ t('robotWarningBanner') }} ✕</div>
+
+  <!-- TOAST -->
+  <transition name="toast">
+    <div v-if="toast.visible" class="toast" :class="toast.type">{{ toast.message }}</div>
+  </transition>
+
   <!-- VIEWER MODE BANNER -->
   <div v-if="isViewer" class="viewer-banner">{{ t('viewerBanner') }}</div>
 
@@ -16,7 +27,7 @@
       <label>{{ t('armIp') }}</label>
       <input type="text" v-model="robotIP"/>
 
-      <button class="connect-btn" @click="connectRobot" :disabled="isViewer">{{ isConnected ? t('disconnect') : t('connect') }}</button>
+      <button class="connect-btn" @click="connectRobot" :disabled="isViewer || isConnecting">{{ isConnecting ? '...' : isConnected ? t('disconnect') : t('connect') }}</button>
 
       <button class="viewer-toggle-btn" @click="toggleViewer" :class="{ active: isViewer }">
         {{ isViewer ? t('viewerMode') : t('controlMode') }}
@@ -26,15 +37,26 @@
 
       <label>{{ t('recipe') }}</label>
 
-      <select :disabled="isViewer">
-        <option
-          v-for="recipe in recipes"
-          :key="recipe.id"
-          :value="recipe.id"
+      <div class="recipe-apply-row">
+        <select v-model="selectedRecipeId" :disabled="isViewer" @change="appliedRecipeId = null">
+          <option :value="null">—</option>
+          <option
+            v-for="recipe in recipes"
+            :key="recipe.id"
+            :value="recipe.id"
+          >
+            {{recipe.name}}
+          </option>
+        </select>
+        <button
+          class="apply-recipe-btn"
+          :class="{ applied: appliedRecipeId && appliedRecipeId === selectedRecipeId }"
+          :disabled="isViewer || !selectedRecipeId"
+          @click="applyRecipe"
         >
-          {{recipe.name}}
-        </option>
-      </select>
+          <span class="apply-dot"></span>
+        </button>
+      </div>
 
     </div>
 
@@ -42,6 +64,10 @@
       <div class="lang-switcher">
         <button :class="{ active: lang === 'zh' }" @click="setLang('zh')">简体</button>
         <button :class="{ active: lang === 'en' }" @click="setLang('en')">EN</button>
+      </div>
+      <div class="robot-status-badge" :class="robotStatus">
+        <span class="robot-status-dot"></span>
+        <span>{{ t('robotStatus_' + robotStatus) }}</span>
       </div>
       <div class="status-box" :class="{ connected: isConnected, disconnected: !isConnected }">
         <div class="status-dot" :class="{ connected: isConnected, disconnected: !isConnected }"></div>
@@ -349,6 +375,14 @@ export default {
 computed: {
   ...mapState(useLangStore, ['lang', 'isViewer']),
   apiBase() { return `http://${window.location.hostname}:3000` },
+  selectedRecipe() { return this.recipes.find(r => r.id === this.selectedRecipeId) || null },
+  robotStatus() {
+    if (!this.isConnected)       return 'idle'
+    if (this.waitingInspection)  return 'waiting_inspection'
+    if (this.isPaused)           return 'paused'
+    if (this.isRunning)          return 'running'
+    return 'ready'
+  },
 },
 
 data(){
@@ -366,6 +400,12 @@ data(){
     pos: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
     posTimer: null,
     camTimer: null,
+    selectedRecipeId: null,
+    appliedRecipeId: null,
+    isConnecting: false,
+    criticalError: null,
+    robotWarning: null,
+    toast: { visible: false, message: '', type: 'ok' },
     runningLabel: null,
     processingLabel: null,
     doneLabels: [],
@@ -397,12 +437,33 @@ mounted(){
     try {
       const r = await fetch(`${this.apiBase}/robot/position`)
       const data = await r.json()
-      if(this.isViewer && data.serverStart){
+      if(data.serverStart){
         if(!this._serverStart) this._serverStart = data.serverStart
         else if(this._serverStart !== data.serverStart) { window.location.reload(); return }
       }
+      if(data.sessionId){
+        if(!this._sessionId) this._sessionId = data.sessionId
+        else if(this._sessionId !== data.sessionId) {
+          this._sessionId       = data.sessionId
+          this.capturedImages   = [null]
+          this.visionObjects    = []
+          this.occupiedCells    = { tray1:[], tray2:[], tray3:[], tray4:[], tray5:[], tray6:[] }
+          this.orders           = { tray1:{}, tray2:{}, tray3:{}, tray4:{}, tray5:{}, tray6:{} }
+          this.doneLabels       = []
+          this.runningLabel     = null
+          this.processingLabel  = null
+          this.visionRobotPoints = []
+          this._cachedImg       = null
+          if(this.$refs.camCanvas) {
+            const ctx = this.$refs.camCanvas.getContext('2d')
+            ctx.clearRect(0, 0, this.$refs.camCanvas.width, this.$refs.camCanvas.height)
+          }
+        }
+      }
       this.pos = data
+      const wasConnected = this.isConnected
       this.isConnected = !!data.connected
+      if(wasConnected && !this.isConnected) this.showToast(this.t('toastDisconnected'), 'error')
       if(data.robotIp && !this.robotIP) this.robotIP = data.robotIp
       if(data.currentLabel      !== undefined) this.runningLabel      = data.currentLabel
       if(data.processingLabel   !== undefined) this.processingLabel   = data.processingLabel
@@ -412,6 +473,13 @@ mounted(){
       if(data.running           !== undefined) this.isRunning         = data.running
       if(data.paused            !== undefined) this.isPaused          = data.paused
       if(data.waitingInspection !== undefined) this.waitingInspection = data.waitingInspection
+      if(data.criticalError !== undefined) this.criticalError = data.criticalError
+      if(data.robotWarning  !== undefined) this.robotWarning  = data.robotWarning
+      if(data.currentRecipeId   !== undefined) {
+        this.appliedRecipeId  = data.currentRecipeId
+        if(data.currentRecipeId && this.selectedRecipeId !== data.currentRecipeId)
+          this.selectedRecipeId = data.currentRecipeId
+      }
       if(data.running && Array.isArray(data.currentPoints)){
         const orders = { tray1:{}, tray2:{}, tray3:{}, tray4:{}, tray5:{}, tray6:{} }
         data.currentPoints.forEach((pt, i) => {
@@ -433,22 +501,25 @@ mounted(){
     } catch(e) {}
   }, 300)
 
-  if(this.isViewer){
-    this.camTimer = setInterval(async () => {
-      try {
-        const camRes = await fetch(`${this.apiBase}/camera/latest`)
-        const camData = await camRes.json()
-        if(camData.image && camData.image !== this.capturedImages[0]){
-          this.capturedImages[0] = camData.image
-          this._origWidth  = camData.origWidth  || 0
-          this._origHeight = camData.origHeight || 0
-          this._cachedImg  = null
-          await this.$nextTick()
-          this.drawCanvas()
-        }
-      } catch(e) {}
-    }, 2000)
-  }
+  this.camTimer = setInterval(async () => {
+    try {
+      const camRes = await fetch(`${this.apiBase}/camera/latest`)
+      const camData = await camRes.json()
+      if(camData.image && camData.image !== this.capturedImages[0]){
+        this.capturedImages[0] = camData.image
+        this._origWidth  = camData.origWidth  || 0
+        this._origHeight = camData.origHeight || 0
+        this._cachedImg  = null
+        await this.$nextTick()
+        this.drawCanvas()
+      } else if(!camData.image && this.capturedImages[0]){
+        this.capturedImages[0] = null
+        this._cachedImg = null
+        const canvas = this.$refs.camCanvas
+        if(canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height)
+      }
+    } catch(e) {}
+  }, 2000)
 },
 
 methods:{
@@ -456,6 +527,26 @@ methods:{
   t(key) { return useLangStore().t(key) },
 
   setLang(l)     { useLangStore().setLang(l) },
+  async applyRecipe() {
+    if (!this.selectedRecipeId) return
+    try {
+      const res = await fetch(`${this.apiBase}/recipe/current`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipeId: this.selectedRecipeId })
+      })
+      if (res.ok) {
+        this.appliedRecipeId = this.selectedRecipeId
+        this.logKey('logRecipeApplied', [this.selectedRecipe?.name], 'ok')
+        this.showToast(this.t('toastRecipeApplied')(this.selectedRecipe?.name), 'ok')
+      } else {
+        this.logKey('logRecipeFail', [res.status], 'error')
+      }
+    } catch(e) {
+      this.logKey('logRecipeFail', [e.message], 'error')
+    }
+  },
+
   toggleViewer() {
     const store = useLangStore()
     store.isViewer = !store.isViewer
@@ -467,28 +558,61 @@ methods:{
     if(this.statusLog.length > 50) this.statusLog.pop()
   },
 
+  showToast(message, type = 'ok') {
+    this.toast = { visible: true, message, type }
+    clearTimeout(this._toastTimer)
+    this._toastTimer = setTimeout(() => { this.toast.visible = false }, 3000)
+  },
+
+  logKey(key, params = [], type = "info") {
+    const val = this.t(key)
+    const text = typeof val === 'function' ? val(...params) : val
+    this.log(text, type)
+    fetch(`${this.apiBase}/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, params, level: type })
+    }).catch(() => {})
+  },
+
   async connectRobot(){
     if(!this.robotIP){ alert(this.t('alertIp')); return }
+    if(this.isConnecting) return
     const action = this.isConnected ? "disconnect" : "connect"
+    if(action === 'disconnect') {
+      const msg = this.isRunning ? this.t('confirmDisconnectRunning') : this.t('confirmDisconnect')
+      if(!confirm(msg)) return
+    }
+    this.isConnecting = true
 
-    const res = await fetch(`${this.apiBase}/robot/${action}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ip: this.robotIP })
-    })
-
-    const data = await res.json()
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), 15000)
+    let data
+    try {
+      const res = await fetch(`${this.apiBase}/robot/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ip: this.robotIP }),
+        signal: abort.signal,
+      })
+      data = await res.json()
+    } catch(e) {
+      data = { success: false, error: e.name === 'AbortError' ? 'Timeout' : e.message }
+    } finally {
+      clearTimeout(timer)
+      this.isConnecting = false
+    }
 
     if(data.success){
-      this.isConnected = !this.isConnected
-
-      if(this.isConnected){
-        this.log(this.t('logConnected')(this.robotIP), "ok")
+      if(action === 'connect'){
+        this.logKey('logConnected', [this.robotIP], "ok")
+        this.showToast(this.t('toastConnected'), 'ok')
       }else{
-        this.log(this.t('logDisconnected'), "error")
+        this.logKey('logDisconnected', [], "error")
+        this.showToast(this.t('toastDisconnected'), 'error')
       }
     } else {
-      this.log(this.t('logConnFail')(action, data.error || ""), "error")
+      this.logKey('logConnFail', [action, data.error || ""], "error")
     }
   },
 
@@ -496,14 +620,14 @@ methods:{
 
     if(this.capturing) return
     if(!this.isConnected){
-      this.log(this.t('logNeedConnect'), "error")
+      this.logKey('logNeedConnect', [], "error")
       return
     }
 
     this.capturing      = true
     this.visionObjects  = []
     this.capturedImages = [null]
-    this.log(this.t('logStartScan'), "info")
+    this.logKey('logStartScan', [], "info")
 
     // 1. Reset data cũ + trigger robot chạy vision node
     await fetch(`${this.apiBase}/vision/reset`, { method: "POST" })
@@ -511,11 +635,11 @@ methods:{
     const trigRes  = await fetch(`${this.apiBase}/vision/trigger`, { method: "POST" })
     const trigData = await trigRes.json()
     if(!trigData.success){
-      this.log(this.t('logTrigFail')(trigData.error || ""), "error")
+      this.logKey('logTrigFail', [trigData.error || ""], "error")
       this.capturing = false
       return
     }
-    this.log(this.t('logTriggered'), "info")
+    this.logKey('logTriggered', [], "info")
 
     // 2. Poll tọa độ robot gửi về qua TCP port 8765 (tối đa 30s)
     let result = null
@@ -534,21 +658,21 @@ methods:{
     }
 
     if(!result){
-      this.log(this.t('logTimeout')(MAX_WAIT), "error")
+      this.logKey('logTimeout', [MAX_WAIT], "error")
       this.capturing = false
       return
     }
 
-    this.log(this.t('logDetected')(result.objects.length), "ok")
+    this.logKey('logDetected', [result.objects.length], "ok")
     this.visionObjects        = result.objects
     this.occupiedCells.tray1  = result.occupied.tray1 || []
     this.visionRobotPoints    = result.robotPoints || []
     this.visionCalibrated     = result.calibrated || false
 
     if(this.visionCalibrated && this.visionRobotPoints.length > 0){
-      this.log(`已換算 ${this.visionRobotPoints.length} điểm robot (vision auto)`, "ok")
+      this.logKey('logVisionCalib', [this.visionRobotPoints.length], "ok")
     } else if(!this.visionCalibrated){
-      this.log("⚠️ Chưa calibrate 4 góc robot — dùng cell thủ công", "info")
+      this.logKey('logVisionNoCalib', [], "info")
     }
 
     // 3. Chụp ảnh để hiển thị + vẽ dot
@@ -627,16 +751,21 @@ methods:{
 
   async startRun(){
     if(!this.isConnected){
-      this.log(this.t('logNeedConnect'), "error")
+      this.logKey('logNeedConnect', [], "error")
       return
     }
+
+    this.capturedImages = [null]
+    this._cachedImg = null
+    const canvas = this.$refs.camCanvas
+    if(canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height)
 
     // Resume nếu đang tạm dừng
     if(this.isPaused){
       const res = await fetch(`${this.apiBase}/robot/resume`, { method: "POST" })
       const data = await res.json()
-      if(data.success) this.log(this.t('logResumed'), "ok")
-      else this.log(this.t('logResumeFail')(data.error || ""), "error")
+      if(data.success) this.logKey('logResumed', [], "ok")
+      else this.logKey('logResumeFail', [data.error || ""], "error")
       return
     }
 
@@ -654,38 +783,42 @@ methods:{
       }
       points.sort((a, b) => a._order - b._order)
       payload = points.map(({ _order, ...p }) => p)
-      this.log(this.t('logManual')(payload.length), "info")
+      this.logKey('logManual', [payload.length], "info")
     } else if(this.visionCalibrated && this.visionRobotPoints.length > 0){
       payload = this.visionRobotPoints
-      this.log(this.t('logVision')(payload.length), "info")
+      this.logKey('logVision', [payload.length], "info")
     } else {
-      this.log(this.t('logNeedScan'), "error")
+      this.logKey('logNeedScan', [], "error")
       return
     }
 
-    this.log(this.t('logRunning')(payload.length), "info")
+    this.logKey('logRunning', [payload.length], "info")
     this.doneLabels  = []
     this.runningLabel = null
 
     const res = await fetch(`${this.apiBase}/robot/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ points: payload, speed: 40 })
+      body: JSON.stringify({
+        points: payload,
+        speed: this.selectedRecipe?.speed || 40,
+        inspect_wait: this.selectedRecipe?.inspect_wait || null,
+      })
     })
 
     const data = await res.json()
     if(data.success){
-      this.log(this.t('logDone'), "ok")
+      this.logKey('logDone', [], "ok")
     } else {
-      this.log(this.t('logRunFail')(data.error || ""), "error")
+      this.logKey('logRunFail', [data.error || ""], "error")
     }
   },
 
   async pauseRun(){
     const res = await fetch(`${this.apiBase}/robot/pause`, { method: "POST" })
     const data = await res.json()
-    if(data.success) this.log(this.t('logPaused'), "info")
-    else this.log(this.t('logPauseFail')(data.error || ""), "error")
+    if(data.success) this.logKey('logPaused', [], "info")
+    else this.logKey('logPauseFail', [data.error || ""], "error")
   },
 
   async stopRun(){
@@ -695,7 +828,7 @@ methods:{
     this.doneLabels  = []
     this.runningLabel    = null
     this.processingLabel = null
-    this.log(this.t('logStopped'), "error")
+    this.logKey('logStopped', [], "error")
   },
 
   toggleCell(tray, n){
@@ -748,6 +881,23 @@ methods:{
 <style scoped>
 * { box-sizing: border-box; }
 
+.recipe-apply-row { display: flex; align-items: center; gap: 6px; }
+.recipe-apply-row select { flex: 1; }
+.apply-recipe-btn {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 2px solid #aaa; background: #fff;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: border-color 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+.apply-recipe-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.apply-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #ccc; transition: background 0.2s;
+}
+.apply-recipe-btn.applied { border-color: #16a34a; }
+.apply-recipe-btn.applied .apply-dot { background: #16a34a; }
+
 .viewer-toggle-btn {
   width: 120px; height: 36px; line-height: 32px;
   font-size: 0.85rem; font-weight: 600; white-space: nowrap;
@@ -759,6 +909,30 @@ methods:{
 .viewer-toggle-btn.active {
   border-color: #1e40af; background: #1e40af; color: #fff;
 }
+.toast {
+  position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+  padding: 12px 28px; border-radius: 8px; font-weight: 600; font-size: 0.95rem;
+  color: #fff; z-index: 9999; box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+  pointer-events: none;
+}
+.toast.ok    { background: #16a34a; }
+.toast.error { background: #dc2626; }
+.toast.info  { background: #2563eb; }
+.toast-enter-active, .toast-leave-active { transition: opacity 0.3s, transform 0.3s; }
+.toast-enter-from { opacity: 0; transform: translateX(-50%) translateY(-12px); }
+.toast-leave-to   { opacity: 0; transform: translateX(-50%) translateY(-12px); }
+
+.critical-banner {
+  background: #dc2626; color: #fff;
+  text-align: center; padding: 10px; font-weight: 700; font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
+.robot-warning-banner {
+  background: #f59e0b; color: #1a1a1a;
+  text-align: center; padding: 8px; font-weight: 600; font-size: 0.9rem;
+  cursor: pointer;
+}
+.robot-warning-banner:hover { background: #d97706; }
 .viewer-banner {
   background: #1e40af; color: #fff;
   text-align: center; padding: 8px; font-weight: 600; font-size: 0.9rem;
@@ -858,6 +1032,29 @@ button:disabled {
  box-sizing:border-box;
 }
 
+
+/* ROBOT STATUS BADGE */
+
+.robot-status-badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px; height: 36px; border-radius: 6px;
+  font-size: 0.8rem; font-weight: 600; margin-right: 8px;
+  background: #f3f4f6; color: #6b7280; border: 1.5px solid #d1d5db;
+}
+.robot-status-badge.ready              { background: #dcfce7; color: #15803d; border-color: #86efac; }
+.robot-status-badge.running            { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
+.robot-status-badge.waiting_inspection { background: #fef3c7; color: #b45309; border-color: #fcd34d; }
+.robot-status-badge.paused             { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+
+.robot-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0;
+}
+.robot-status-badge.running .robot-status-dot {
+  animation: blink 1s infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; } 50% { opacity: 0.3; }
+}
 
 /* STATUS */
 

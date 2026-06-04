@@ -6,21 +6,30 @@ router.use(apiKey)
 
 // ─── inject shared state từ server.js ────────────────────────────────────────
 let _state = null
-function init(state) { _state = state }
+let _db    = null
+function init(state, db) { _state = state; _db = db }
+
+const BASE = "http://localhost:3000"
+async function proxy(method, path, body) {
+  const opts = { method, headers: { "Content-Type": "application/json" } }
+  if (body) opts.body = JSON.stringify(body)
+  const r = await fetch(BASE + path, opts)
+  return r.json()
+}
 
 // ─── GET /integration/status ─────────────────────────────────────────────────
 router.get("/status", (req, res) => {
   const { tmClient, tmMonitor, gripperOpen, inspectCountdown, robotPaused, waitingInspection, integrationRecipe } = _state
   res.json({
-    mode: "integration",
     status: deriveStatus(_state),
-    recipe: integrationRecipe || null,
-    robot_position: tmMonitor.pos || {},
     robot_connected: tmClient.connected,
+    running: tmClient.running,
+    paused: robotPaused,
     waiting_inspection: waitingInspection,
     inspect_countdown_s: inspectCountdown,
     gripper_open: gripperOpen,
-    paused: robotPaused,
+    recipe: integrationRecipe || null,
+    robot_position: tmMonitor.pos || {},
     updated_at: new Date().toISOString(),
   })
 })
@@ -30,12 +39,7 @@ router.post("/connect", async (req, res) => {
   const { ip } = req.body
   if (!ip) return res.status(400).json({ error: "ip required" })
   try {
-    const r = await fetch(`http://localhost:3000/robot/connect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ip }),
-    })
-    const data = await r.json()
+    const data = await proxy("POST", "/robot/connect", { ip })
     if (!data.success) return res.status(500).json(data)
     res.json({ success: true })
   } catch (e) {
@@ -43,11 +47,44 @@ router.post("/connect", async (req, res) => {
   }
 })
 
+// ─── POST /integration/disconnect ────────────────────────────────────────────
+router.post("/disconnect", async (req, res) => {
+  try {
+    const data = await proxy("POST", "/robot/disconnect")
+    res.json(data)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── GET /integration/recipes ─────────────────────────────────────────────────
+router.get("/recipes", (req, res) => {
+  _db.all("SELECT * FROM recipes", (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message })
+    res.json(rows)
+  })
+})
+
+// ─── POST /integration/recipe/apply ──────────────────────────────────────────
+// Apply a saved recipe by ID — sets it as the active recipe for /run
+router.post("/recipe/apply", (req, res) => {
+  const { recipeId } = req.body
+  if (!recipeId) return res.status(400).json({ error: "recipeId required" })
+  _db.get("SELECT * FROM recipes WHERE id = ?", [recipeId], (err, row) => {
+    if (err)  return res.status(500).json({ error: err.message })
+    if (!row) return res.status(404).json({ error: "Recipe not found" })
+    _state.integrationRecipe = { speed: row.speed, grip: row.grip, open: row.open, inspect_wait: row.inspect_wait }
+    _state.currentRecipeId   = row.id
+    res.json({ success: true, recipe: row })
+  })
+})
+
 // ─── POST /integration/recipe ────────────────────────────────────────────────
+// Set recipe params inline (without saving to DB)
 router.post("/recipe", (req, res) => {
-  const { speed, grip, open } = req.body
+  const { speed, grip, open, inspect_wait } = req.body
   if (!speed) return res.status(400).json({ error: "speed required" })
-  _state.integrationRecipe = { speed, grip, open }
+  _state.integrationRecipe = { speed, grip, open, inspect_wait }
   res.json({ success: true, recipe: _state.integrationRecipe })
 })
 
@@ -55,19 +92,20 @@ router.post("/recipe", (req, res) => {
 router.post("/detect", async (req, res) => {
   if (!_state.tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
   try {
-    const r = await fetch("http://localhost:3000/vision/trigger", { method: "POST" })
-    const d = await r.json()
+    const d = await proxy("POST", "/vision/trigger")
     if (!d.success) return res.status(500).json({ error: d.error || "trigger failed" })
 
-    // Poll vision/latest tối đa 30s
     for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 500))
-      const vr = await fetch("http://localhost:3000/vision/latest")
-      const vd = await vr.json()
+      const vd = await proxy("GET", "/vision/latest")
       if (vd && vd.done) {
         return res.json({
           detected_at: new Date().toISOString(),
-          trays: buildTraysMatrix(vd),
+          found: vd.found,
+          objects: vd.objects,
+          occupied: vd.occupied,
+          robot_points: vd.robotPoints,
+          calibrated: vd.calibrated,
         })
       }
     }
@@ -79,27 +117,26 @@ router.post("/detect", async (req, res) => {
 
 // ─── POST /integration/run ───────────────────────────────────────────────────
 router.post("/run", async (req, res) => {
-  const { cells } = req.body
+  const { cells, points } = req.body
   if (!_state.tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
   if (_state.tmClient.running)    return res.status(400).json({ error: "Already running" })
-  if (!cells || cells.length === 0) return res.status(400).json({ error: "No cells provided" })
-  if (!_state.integrationRecipe)  return res.status(400).json({ error: "No recipe loaded" })
 
-  const { speed } = _state.integrationRecipe
+  const recipe = _state.integrationRecipe
+  if (!recipe) return res.status(400).json({ error: "No recipe loaded — call /recipe or /recipe/apply first" })
 
-  // cells phải có x,y từ client hoặc dùng detect trước
-  // Nếu client chỉ gửi tray_id+cell thì cần server tính tọa độ — hiện tại cần x,y trong mỗi cell
-  const points = cells.map(({ tray_id, cell, x, y }) => ({
-    x, y, label: `tray${tray_id}-cell${cell}`
-  }))
+  // Accept either raw points[] or cells[] with x,y
+  const payload = points
+    ? points
+    : (cells || []).map(({ tray_id, cell, x, y }) => ({ x, y, label: `tray${tray_id}-cell${cell}` }))
+
+  if (!payload.length) return res.status(400).json({ error: "No points provided" })
 
   try {
-    const r = await fetch("http://localhost:3000/robot/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ points, speed }),
+    const data = await proxy("POST", "/robot/run", {
+      points: payload,
+      speed: recipe.speed,
+      inspect_wait: recipe.inspect_wait || null,
     })
-    const data = await r.json()
     if (!data.success) return res.status(500).json(data)
     res.json({ success: true })
   } catch (e) {
@@ -133,12 +170,30 @@ router.post("/resume", (req, res) => {
 // ─── POST /integration/stop ──────────────────────────────────────────────────
 router.post("/stop", async (req, res) => {
   try {
-    const r = await fetch("http://localhost:3000/robot/stop", { method: "POST" })
-    const data = await r.json()
+    const data = await proxy("POST", "/robot/stop")
     res.json(data)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
+})
+
+// ─── GET /integration/camera/latest ──────────────────────────────────────────
+router.get("/camera/latest", async (req, res) => {
+  try {
+    const data = await proxy("GET", "/camera/latest")
+    res.json(data)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── GET /integration/logs ────────────────────────────────────────────────────
+router.get("/logs", (req, res) => {
+  const limit = parseInt(req.query.limit) || 100
+  _db.all("SELECT * FROM logs ORDER BY ts DESC LIMIT ?", [limit], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message })
+    res.json(rows)
+  })
 })
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -148,14 +203,6 @@ function deriveStatus({ tmClient, robotPaused, waitingInspection }) {
   if (robotPaused)         return "paused"
   if (tmClient.running)    return "running"
   return "ready"
-}
-
-function buildTraysMatrix(vd) {
-  return [1,2,3,4,5,6].map(id => ({
-    tray_id: id,
-    total_cells: 20,
-    occupied_cells: id === 1 ? (vd.occupied?.tray1 || []) : [],
-  }))
 }
 
 module.exports = { router, init }

@@ -65,6 +65,7 @@ class TMClient {
       this.socket.on("error", (e) => { clearTimeout(timer); reject(e) })
       this.socket.connect(this.port, this.ip, () => {
         clearTimeout(timer)
+        if (!this.socket) return
         this.connected = true
         this.socket.setTimeout(IDLE_TIMEOUT)
         this.socket.on("timeout", () => {

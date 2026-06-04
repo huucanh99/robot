@@ -2,6 +2,24 @@ process.stdout.setEncoding("utf8")
 process.stderr.setEncoding("utf8")
 require("dotenv").config()
 
+let criticalError = null
+let robotWarning  = null
+
+const CONNECTION_ERRS = ['ECONNRESET','EPIPE','ECONNREFUSED','ETIMEDOUT','socket','Socket','listen','Listen','disconnect','destroyed','setTimeout','aborted','timeout']
+
+function classifyError(msg) {
+  if (CONNECTION_ERRS.some(k => msg.includes(k))) {
+    robotWarning = msg
+    console.warn("[RobotWarning]", msg)
+  } else {
+    criticalError = msg
+    console.error("[CRITICAL]", msg)
+  }
+}
+
+process.on("uncaughtException",  e => classifyError(e.message || String(e)))
+process.on("unhandledRejection", e => classifyError(e?.message || String(e)))
+
 const express = require("express")
 const sqlite3 = require("sqlite3").verbose()
 const cors    = require("cors")
@@ -14,11 +32,19 @@ const { router: integrationRouter, init: initIntegration } = require("./integrat
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: "10mb" }))
 
 const SERVER_START_TIME = Date.now()
 
 const db = new sqlite3.Database("./database.db")
+db.run("ALTER TABLE recipes ADD COLUMN inspect_wait REAL", () => {})
+db.run(`CREATE TABLE IF NOT EXISTS logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  key TEXT NOT NULL,
+  params TEXT NOT NULL DEFAULT '[]'
+)`)
 
 const tmClient     = new TMClient()
 const tmMonitor    = new TMMonitor()
@@ -44,9 +70,30 @@ let inspectCountdown     = 0
 let robotPaused          = false
 let waitingInspection    = false
 let currentPoints        = []
+let currentRecipeId      = null
 let lastCapturedImage    = null
 let continueResolve      = null
 let integrationRecipe    = null
+let sessionId            = Date.now()
+
+function resetSession() {
+  gripperOpen       = true
+  inspectCountdown  = 0
+  robotPaused       = false
+  waitingInspection = false
+  currentPoints     = []
+  lastCapturedImage = null
+  tagCounter        = 100
+  saveTagCounter()
+  if (continueResolve) { continueResolve(false); continueResolve = null }
+  tmClient.running          = false
+  tmMonitor.currentLabel    = null
+  tmMonitor.processingLabel = null
+  tmMonitor.doneLabels      = []
+  sessionId = Date.now()
+  resetVisionFrame()
+  console.log("[Session] Reset — new session", sessionId)
+}
 
 const ORI            = { rx: 180, ry: 0, rz: 84 }           // orientation cố định toàn bộ
 const POS_SAFE       = { label: "safe",    x: 585, y: 100,  z: 250, ...ORI }
@@ -199,10 +246,24 @@ visionServer.listen(8765, () => console.log("[Vision] TCP server listening on po
 
 
 // ─── Robot endpoints ──────────────────────────────────────────────────────────
-setInterval(() => {
+let _clientReconnecting = false
+setInterval(async () => {
   if (!tmMonitor.connected && !tmClient.running && tmClient.ip) {
-    console.warn("[Monitor] Detected disconnected → reconnecting...")
     autoConnectMonitor(tmClient.ip)
+  }
+  if (!tmClient.connected && !tmClient.running && tmClient.ip && !_clientReconnecting) {
+    _clientReconnecting = true
+    console.log("[Client] Disconnected — waiting for Listen Node...")
+    try {
+      await tmClient.connect()
+      await tmClient.waitForListenNode()
+      resetSession()
+      console.log("[Client] Auto-reconnected ✓")
+    } catch(e) {
+      console.log("[Client] Reconnect failed, will retry:", e.message)
+    } finally {
+      _clientReconnecting = false
+    }
   }
 }, 5000)
 app.post("/robot/connect", async (req, res) => {
@@ -214,7 +275,9 @@ app.post("/robot/connect", async (req, res) => {
   }
 
   if (tmClient.connected) return res.json({ success: true })
+  if (_clientReconnecting) return res.status(400).json({ error: "Already connecting" })
 
+  _clientReconnecting = true
   try {
     tmClient.ip = ip
     await tmClient.connect()
@@ -224,6 +287,8 @@ app.post("/robot/connect", async (req, res) => {
   } catch (e) {
     tmClient.disconnect()
     res.status(500).json({ error: e.message })
+  } finally {
+    _clientReconnecting = false
   }
 })
 
@@ -263,7 +328,17 @@ app.get("/robot/position", (req, res) => {
     waitingInspection,
     currentPoints,
     serverStart: SERVER_START_TIME,
+    currentRecipeId,
+    sessionId,
+    criticalError,
+    robotWarning,
   })
+})
+
+app.post("/recipe/current", (req, res) => {
+  const { recipeId } = req.body
+  currentRecipeId = recipeId ?? null
+  res.json({ ok: true })
 })
 
 async function movePt(pt, speed) {
@@ -326,17 +401,17 @@ async function sendWebhook(event, cell = null, message = null) {
   }
 }
 
-async function waitForContinue() {
+async function waitForContinue(timeoutMs = INSPECT_TIMEOUT_MS) {
   waitingInspection = true
-  inspectCountdown  = Math.ceil(INSPECT_TIMEOUT_MS / 1000)
+  inspectCountdown  = Math.ceil(timeoutMs / 1000)
   const timeoutId   = setTimeout(() => {
     if (continueResolve) {
-      continueResolve(false)
+      continueResolve(true)
       continueResolve = null
     }
-  }, INSPECT_TIMEOUT_MS)
+  }, timeoutMs)
 
-  const warnDelay = INSPECT_TIMEOUT_MS - 120000
+  const warnDelay = timeoutMs - 120000
   const warnId = warnDelay > 0 ? setTimeout(() => {
     sendWebhook("inspection_timeout_warning")
   }, warnDelay) : null
@@ -358,7 +433,8 @@ async function waitForContinue() {
   return signalled && tmClient.running
 }
 app.post("/robot/run", async (req, res) => {
-  const { points, speed = 30 } = req.body
+  const { points, speed = 30, inspect_wait } = req.body
+  const inspectWaitMs = inspect_wait > 0 ? inspect_wait * 1000 : INSPECT_TIMEOUT_MS
 
   if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
   if (tmClient.running) return res.status(400).json({ error: "Already running" })
@@ -402,7 +478,7 @@ for (const pt of points) {
 
   tmMonitor.processingLabel = pt.label
 
-  const ok = await runPointBatch(pt, speed, pt.label)
+  const ok = await runPointBatch(pt, speed, pt.label, inspectWaitMs)
   if (!ok) {
     tmClient.running = false
     return res.status(500).json({ error: `Point ${pt.label} failed` })
@@ -562,19 +638,19 @@ app.post("/vision/trigger", async (req, res) => {
 // 4 corner pixel positions đo thực tế từ ảnh camera (cell1, cell4, cell17, cell20)
 
 const TRAY1_CAL_SRC = [
-  [ 977.8729, 365.3779  ],  // cell 1  → col=0, row=0
-  [2118.4133, 354.37622 ],  // cell 4  → col=3, row=0
-  [1004.2274, 1408.9663 ],  // cell 17 → col=0, row=4
-  [2136.332,  1373.8911 ],  // cell 20 → col=3, row=4
+  [ 646.3738, 451.65985 ],  // cell 1  → col=0, row=0
+  [1738.88,   457.14157 ],  // cell 4  → col=3, row=0
+  [ 634.3767, 1426.3755 ],  // cell 17 → col=0, row=4
+  [1737.1605, 1434.6619 ],  // cell 20 → col=3, row=4
 ]
 const TRAY1_CAL_DST = [[0,0],[3,0],[0,4],[3,4]]
 
 // !! ĐIỀN VÀO: jog robot đến đúng 4 góc, đọc x,y tại mỗi góc (cùng thứ tự với TRAY1_CAL_SRC)
 const TRAY1_ROBOT_CORNERS = [
-  [565, 272],  // cell 1
-  [561, 153],  // cell 4
-  [457, 274],  // cell 17
-  [447, 156],  // cell 20
+  [637, 273],  // cell 1
+  [637, 152],  // cell 4
+  [528, 275],  // cell 17
+  [521, 158],  // cell 20
 ]
 
 const TRAY1_ROBOT_CALIBRATED = TRAY1_ROBOT_CORNERS.some(([x, y]) => x !== 0 || y !== 0)
@@ -761,6 +837,28 @@ app.post("/camera/move-and-capture", async (req, res) => {
 
 // ─── Recipe endpoints ─────────────────────────────────────────────────────────
 
+app.post("/logs", (req, res) => {
+  const { key, params = [], level = "info" } = req.body
+  db.run(
+    "INSERT INTO logs (ts, level, key, params) VALUES (?,?,?,?)",
+    [Date.now(), level, key, JSON.stringify(params)],
+    err => err ? res.status(500).json(err) : res.json({ ok: true })
+  )
+})
+
+app.get("/logs", (req, res) => {
+  const limit = parseInt(req.query.limit) || 500
+  db.all(
+    "SELECT * FROM logs ORDER BY ts DESC LIMIT ?",
+    [limit],
+    (err, rows) => err ? res.status(500).json(err) : res.json(rows)
+  )
+})
+
+app.delete("/logs", (req, res) => {
+  db.run("DELETE FROM logs", err => err ? res.status(500).json(err) : res.json({ ok: true }))
+})
+
 app.get("/recipes", (req, res) => {
   db.all("SELECT * FROM recipes", (err, rows) => {
     if (err) res.status(500).json(err)
@@ -769,10 +867,10 @@ app.get("/recipes", (req, res) => {
 })
 
 app.post("/recipes", (req, res) => {
-  const { name, speed, grip, open, wait } = req.body
+  const { name, speed, grip, open, inspect_wait } = req.body
   db.run(
-    "INSERT INTO recipes (name,speed,grip,open,wait) VALUES (?,?,?,?,?)",
-    [name, speed, grip, open, wait],
+    "INSERT INTO recipes (name,speed,grip,open,inspect_wait) VALUES (?,?,?,?,?)",
+    [name, speed, grip, open, inspect_wait ?? null],
     function(err) {
       if (err) res.status(500).json(err)
       else res.json({ id: this.lastID })
@@ -781,10 +879,10 @@ app.post("/recipes", (req, res) => {
 })
 
 app.put("/recipes/:id", (req, res) => {
-  const { name, speed, grip, open, wait } = req.body
+  const { name, speed, grip, open, inspect_wait } = req.body
   db.run(
-    "UPDATE recipes SET name=?,speed=?,grip=?,open=?,wait=? WHERE id=?",
-    [name, speed, grip, open, wait, req.params.id],
+    "UPDATE recipes SET name=?,speed=?,grip=?,open=?,inspect_wait=? WHERE id=?",
+    [name, speed, grip, open, inspect_wait ?? null, req.params.id],
     err => {
       if (err) res.status(500).json(err)
       else res.json({ success: true })
@@ -805,14 +903,16 @@ app.delete("/recipes/:id", (req, res) => {
 
 initIntegration({
   tmClient, tmMonitor,
-  get gripperOpen()      { return gripperOpen },
-  get inspectCountdown() { return inspectCountdown },
-  get robotPaused()      { return robotPaused },      set robotPaused(v)      { robotPaused = v },
-  get waitingInspection(){ return waitingInspection },
-  get continueResolve()  { return continueResolve },  set continueResolve(v)  { continueResolve = v },
-  get integrationRecipe(){ return integrationRecipe }, set integrationRecipe(v){ integrationRecipe = v },
-})
+  get gripperOpen()       { return gripperOpen },
+  get inspectCountdown()  { return inspectCountdown },
+  get robotPaused()       { return robotPaused },       set robotPaused(v)       { robotPaused = v },
+  get waitingInspection() { return waitingInspection },
+  get continueResolve()   { return continueResolve },   set continueResolve(v)   { continueResolve = v },
+  get integrationRecipe() { return integrationRecipe },  set integrationRecipe(v) { integrationRecipe = v },
+  get currentRecipeId()   { return currentRecipeId },   set currentRecipeId(v)   { currentRecipeId = v },
+}, db)
 app.use("/integration", integrationRouter)
+
 
 app.listen(3000, () => {
   console.log("server running")
@@ -832,7 +932,7 @@ function autoConnectMonitor(ip) {
     })
 }
 
-async function runPointBatch(rawPt, speed, currentCell = null) {
+async function runPointBatch(rawPt, speed, currentCell = null, inspectWaitMs = INSPECT_TIMEOUT_MS) {
   const pt           = { ...rawPt, z: TRAY_HOVER_Z, ...ORI }
   const lowerPt      = { ...pt,    z: TRAY_PICK_Z }
   const lowerInspect = { ...POS_INSPECT, z: POS_INSPECT.z - LOWER_MM }
@@ -871,15 +971,8 @@ async function runPointBatch(rawPt, speed, currentCell = null) {
   await new Promise(r => setTimeout(r, 2000))
   waitingInspection = true
 
-  const webhookOk = await sendWebhook("inspection_start", currentCell)
-  if (!webhookOk) {
-    console.warn("[webhook] failed — auto-continuing after 3s")
-    waitingInspection = true
-    await new Promise(r => setTimeout(r, 3000))
-    waitingInspection = false
-  } else {
-    if (!await waitForContinue()) return false
-  }
+  sendWebhook("inspection_start", currentCell).catch(() => {})
+  if (!await waitForContinue(inspectWaitMs)) return false
   await waitIfPaused(); if (!tmClient.running) return false
 
   // Script 4: pick lại từ inspect → gripper close

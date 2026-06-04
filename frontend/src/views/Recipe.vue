@@ -139,6 +139,21 @@ v-model="form.name"
 </div>
 
 
+<div class="form-row">
+
+<label>{{ t('fieldInspectWait') }}</label>
+
+<div class="input-box">
+
+<input v-model="form.inspect_wait" type="number" min="1"/>
+
+<span class="unit">s</span>
+
+</div>
+
+</div>
+
+
 </div>
 
 
@@ -229,6 +244,7 @@ name:"",
 speed:"",
 grip:"",
 open:"",
+inspect_wait:"",
 }
 
 },
