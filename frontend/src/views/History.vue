@@ -3,7 +3,7 @@
 
   <div class="history-header">
     <span class="title">{{ t('historyTitle') }}</span>
-    <button class="clear-btn" @click="clearAll" :disabled="isViewer">{{ t('historyClear') }}</button>
+    <button class="clear-btn" @click="clearAll" :disabled="isViewer" :title="t('tipHistoryClear')">{{ t('historyClear') }}</button>
   </div>
 
   <!-- FILTERS -->
@@ -13,6 +13,7 @@
         v-for="opt in timeOpts" :key="opt.value"
         class="filter-btn"
         :class="{ active: filterTime === opt.value }"
+        :title="t('tipFilterTime')"
         @click="filterTime = opt.value"
       >{{ t(opt.label) }}</button>
     </div>
@@ -21,6 +22,7 @@
         v-for="opt in levelOpts" :key="opt.value"
         class="filter-btn"
         :class="['level-' + opt.value, { active: filterLevel === opt.value }]"
+        :title="t('tipFilterLevel')"
         @click="filterLevel = opt.value"
       >{{ t(opt.label) }}</button>
     </div>

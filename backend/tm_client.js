@@ -42,6 +42,7 @@ class TMClient {
     this.buffer       = ""
     this.connected    = false
     this.running      = false
+    this._socketGen   = 0     // tăng mỗi lần disconnect — để waitForListenNode detect socket thay đổi
     // Separate queues per packet type — prevents cross-contamination
     this.tmsctQueue   = []   // buffered TMSCT / CPERR packets
     this.tmstaQueue   = []   // buffered TMSTA packets
@@ -56,12 +57,16 @@ class TMClient {
       this.socket = new net.Socket()
 
       const timer = setTimeout(() => {
-        this.socket.destroy()
+        if (this.socket) this.socket.destroy()
         reject(new Error(`無法連線到 ${this.ip}:${this.port}，請確認 IP 是否正確`))
       }, CONNECT_TIMEOUT)
 
       this.socket.on("data",  (d) => this._onData(d))
-      this.socket.on("close", ()  => { this.connected = false; this.socket = null })
+      this.socket.on("close", ()  => {
+        this.connected = false
+        this.socket    = null
+        this._rejectAllWaiters(new Error("Socket disconnected"))
+      })
       this.socket.on("error", (e) => { clearTimeout(timer); reject(e) })
       this.socket.connect(this.port, this.ip, () => {
         clearTimeout(timer)
@@ -78,14 +83,14 @@ class TMClient {
   }
 
   disconnect() {
+    this._socketGen++                                              // invalidate mọi waitForListenNode đang chạy
+    this._rejectAllWaiters(new Error("Disconnected"))
     if (this.socket) { this.socket.destroy(); this.socket = null }
     this.connected    = false
     this.running      = false
     this.buffer       = ""
     this.tmsctQueue   = []
     this.tmstaQueue   = []
-    this.tmsctWaiters = []
-    this.tmstaWaiters = []
   }
 
   // ── routing ─────────────────────────────────────────────────────────────
@@ -104,17 +109,23 @@ class TMClient {
     }
   }
 
+  _rejectAllWaiters(err) {
+    ;[...this.tmsctWaiters, ...this.tmstaWaiters].forEach(w => w.reject(err))
+    this.tmsctWaiters = []
+    this.tmstaWaiters = []
+  }
+
   _route(pkt) {
     console.log(`[PKT←] header=${pkt.header} data=${pkt.data}`)
     if (pkt.header === "TMSCT" || pkt.header === "CPERR") {
       if (this.tmsctWaiters.length > 0) {
-        this.tmsctWaiters.shift()(pkt)
+        this.tmsctWaiters.shift().resolve(pkt)
       } else {
         this.tmsctQueue.push(pkt)
       }
     } else if (pkt.header === "TMSTA") {
       if (this.tmstaWaiters.length > 0) {
-        this.tmstaWaiters.shift()(pkt)
+        this.tmstaWaiters.shift().resolve(pkt)
       } else {
         this.tmstaQueue.push(pkt)
       }
@@ -127,12 +138,11 @@ class TMClient {
     if (queue.length > 0) return Promise.resolve(queue.shift())
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        const idx = waiters.findIndex(f => f === handler)
+        const idx = waiters.findIndex(w => w.resolve === resolve)
         if (idx >= 0) waiters.splice(idx, 1)
         reject(new Error("Receive timeout"))
       }, timeout)
-      const handler = (pkt) => { clearTimeout(timer); resolve(pkt) }
-      waiters.push(handler)
+      waiters.push({ resolve: pkt => { clearTimeout(timer); resolve(pkt) }, reject })
     })
   }
 
@@ -151,21 +161,31 @@ class TMClient {
 
   // ── wait for Listen Node ────────────────────────────────────────────────
 
-  async waitForListenNode() {
-    if (await this.queryListenMode()) return
-
-    // Robot reachable but not in Listen Node yet — wait max 10s
-    console.log("[Wait] Robot not in Listen Node yet, waiting up to 10s...")
-    const pkt = await this.recvTMSCT(10000).catch(() => null)
-    if (pkt && pkt.header === "TMSCT") {
-      console.log("[Listen Node] Entered")
-      return
+  // Chỉ poll cho đến khi robot vào Listen Node — KHÔNG tự reconnect
+  async waitForListenNode(maxWaitMs = 15000) {
+    const myGen  = this._socketGen   // snapshot generation khi bắt đầu
+    const deadline = Date.now() + maxWaitMs
+    while (Date.now() < deadline) {
+      // Socket bị disconnect() từ bên ngoài (manual connect, new session) → dừng ngay
+      if (this._socketGen !== myGen)  throw new Error("Connection reset")
+      if (this.running)               throw new Error("__RUN_STARTED__")
+      if (!this.connected) {
+        await new Promise(r => setTimeout(r, 300))
+        continue
+      }
+      if (await this.queryListenMode()) return
+      const pkt = await this.recvTMSCT(2000).catch(() => null)
+      if (pkt && pkt.header === "TMSCT") {
+        console.log("[Listen Node] Entered")
+        return
+      }
+      await new Promise(r => setTimeout(r, 300))
     }
-    throw new Error("Robot not in Listen Node — enable Listen Node in TMFlow")
+    throw new Error("Robot not in Listen Node")
   }
 
   async queryListenMode() {
-    this.sendRaw("TMSTA", "00")
+    try { this.sendRaw("TMSTA", "00") } catch (_) { return false }
     const resp = await this.recvTMSTA(5000).catch(() => null)
     if (resp) {
       const parts = resp.data.split(",")
@@ -194,6 +214,9 @@ class TMClient {
   // ── wait QueueTag ───────────────────────────────────────────────────────
 
   async waitQueueTag(tagId, pollInterval = 100, maxWait = 120000) {
+    // Xả hết TMSTA cũ trong queue (broadcast tự động từ script trước, không liên quan đến script này)
+    this.tmstaQueue = []
+
     const deadline = Date.now() + maxWait
     const start    = Date.now()
     console.log(`[Wait] QueueTag ${tagId}...`)
@@ -203,11 +226,27 @@ class TMClient {
         throw new Error(`QueueTag ${tagId} aborted`)
       if (Date.now() > deadline)
         throw new Error(`QueueTag ${tagId} timeout — robot không phản hồi sau ${maxWait / 1000}s`)
-      this.sendRaw("TMSTA", `01,${tagId}`)
-      const resp = await this.recvTMSTA(10000)
-      if (!resp) throw new Error(`QueueTag ${tagId} — không nhận được phản hồi TMSTA`)
+
+      // Socket đang disconnect — chờ reconnect, không fail ngay
+      if (!this.connected) {
+        await new Promise(r => setTimeout(r, 200))
+        continue
+      }
+
+      try { this.sendRaw("TMSTA", `01,${tagId}`) } catch (_) {
+        await new Promise(r => setTimeout(r, 200))
+        continue
+      }
+
+      const resp = await this.recvTMSTA(10000).catch(() => null)
+      if (!resp) {
+        await new Promise(r => setTimeout(r, 200))
+        continue
+      }
+
       const parts = resp.data.split(",")
-      if (parts.length >= 3 && parts[1] === String(tagId) && parts[2].toLowerCase() === "true") {
+      // parseInt để xử lý cả "1" lẫn "01" (robot đôi khi zero-pad tagId)
+      if (parts.length >= 3 && parseInt(parts[1]) === tagId && parts[2].toLowerCase() === "true") {
         const elapsed = ((Date.now() - start) / 1000).toFixed(1)
         console.log(`[QueueTag ${tagId}] Done (${elapsed}s)`)
         return

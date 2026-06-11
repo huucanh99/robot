@@ -6,7 +6,7 @@
 
 <p>{{ t('recipeTitle') }}</p>
 
-<button class="add-btn" @click="createRecipe" :disabled="isViewer">
+<button class="add-btn" @click="createRecipe" :disabled="isViewer" :title="t('tipAddRecipe')">
 {{ t('addRecipe') }}
 </button>
 
@@ -42,6 +42,7 @@ class="recipe-item"
 class="edit-btn"
 @click="editRecipe(recipe)"
 :disabled="isViewer"
+:title="t('tipEditRecipe')"
 >
 {{ t('editBtn') }}
 </button>
@@ -50,6 +51,7 @@ class="edit-btn"
 class="delete-btn"
 @click="deleteRecipe(recipe.id)"
 :disabled="isViewer"
+:title="t('tipDeleteRecipe')"
 >
 {{ t('deleteBtn') }}
 </button>
@@ -139,35 +141,21 @@ v-model="form.name"
 </div>
 
 
-<div class="form-row">
-
-<label>{{ t('fieldInspectWait') }}</label>
-
-<div class="input-box">
-
-<input v-model="form.inspect_wait" type="number" min="1"/>
-
-<span class="unit">s</span>
-
-</div>
-
-</div>
-
 
 </div>
 
 
 <div class="button-bar">
 
-<button class="save-btn" @click="saveEdit" :disabled="isViewer">
+<button class="save-btn" @click="saveEdit" :disabled="isViewer" :title="t('tipSaveRecipe')">
 {{ t('saveBtn') }}
 </button>
 
-<button class="cancel-btn" @click="cancelEdit" :disabled="isViewer">
+<button class="cancel-btn" @click="cancelEdit" :disabled="isViewer" :title="t('tipCancelRecipe')">
 {{ t('cancelBtn') }}
 </button>
 
-<button class="new-btn" @click="saveAsNew" :disabled="isViewer">
+<button class="new-btn" @click="saveAsNew" :disabled="isViewer" :title="t('tipSaveAsRecipe')">
 {{ t('saveAsBtn') }}
 </button>
 

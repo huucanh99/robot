@@ -16,8 +16,8 @@
   <!-- VIEWER MODE BANNER -->
   <div v-if="isViewer" class="viewer-banner">{{ t('viewerBanner') }}</div>
 
-  <!-- WAITING INSPECTION BANNER -->
-  <div v-if="waitingInspection" class="inspect-banner">{{ t('inspectBanner') }}</div>
+  <!-- WAITING RETURN BANNER -->
+  <div v-if="waitingReturn" class="inspect-banner">{{ t('waitingReturnBanner') }}</div>
 
   <!-- TOP BAR -->
   <div class="top-bar">
@@ -27,9 +27,11 @@
       <label>{{ t('armIp') }}</label>
       <input type="text" v-model="robotIP"/>
 
-      <button class="connect-btn" @click="connectRobot" :disabled="isViewer || isConnecting">{{ isConnecting ? '...' : isConnected ? t('disconnect') : t('connect') }}</button>
+      <button class="connect-btn" @click="connectRobot" :disabled="isViewer || isConnecting"
+        :title="isConnected ? t('tipDisconnect') : t('tipConnect')">{{ isConnecting ? '...' : isConnected ? t('disconnect') : t('connect') }}</button>
 
-      <button class="viewer-toggle-btn" @click="toggleViewer" :class="{ active: isViewer }">
+      <button class="viewer-toggle-btn" @click="toggleViewer" :class="{ active: isViewer }"
+        :title="isViewer ? t('tipSwitchToControl') : t('tipSwitchToViewer')">
         {{ isViewer ? t('viewerMode') : t('controlMode') }}
       </button>
 
@@ -38,20 +40,47 @@
       <label>{{ t('recipe') }}</label>
 
       <div class="recipe-apply-row">
-        <select v-model="selectedRecipeId" :disabled="isViewer" @change="appliedRecipeId = null">
-          <option :value="null">—</option>
-          <option
-            v-for="recipe in recipes"
-            :key="recipe.id"
-            :value="recipe.id"
+        <div class="recipe-dropdown" :class="{ open: recipeDropdownOpen }" v-click-outside="closeRecipeDropdown">
+          <button
+            type="button"
+            class="recipe-dropdown-trigger"
+            :disabled="isViewer"
+            :title="t('tipRecipeDropdown')"
+            @click="recipeDropdownOpen = !recipeDropdownOpen"
           >
-            {{recipe.name}}
-          </option>
-        </select>
+            <span>{{ selectedRecipe ? selectedRecipe.name : '—' }}</span>
+            <svg width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
+          </button>
+          <div class="recipe-dropdown-menu" v-if="recipeDropdownOpen">
+            <div
+              class="recipe-dropdown-item"
+              :class="{ selected: selectedRecipeId === null }"
+              @click="selectRecipeItem(null)"
+            >—</div>
+            <div
+              v-for="r in recipes"
+              :key="r.id"
+              class="recipe-dropdown-item"
+              :class="{ selected: selectedRecipeId === r.id }"
+              @mouseenter="hoveredRecipe = r"
+              @mouseleave="hoveredRecipe = null"
+              @click="selectRecipeItem(r.id)"
+            >
+              <span>{{ r.name }}</span>
+              <span v-if="appliedRecipeId === r.id" class="recipe-item-dot"></span>
+              <div class="recipe-tooltip" v-if="hoveredRecipe && hoveredRecipe.id === r.id">
+                <div class="recipe-tooltip-row"><span>Speed</span><strong>{{ r.speed }}%</strong></div>
+                <div class="recipe-tooltip-row"><span>Grip</span><strong>{{ r.grip ?? '—' }}</strong></div>
+                <div class="recipe-tooltip-row"><span>Open</span><strong>{{ r.open ?? '—' }}</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
         <button
           class="apply-recipe-btn"
           :class="{ applied: appliedRecipeId && appliedRecipeId === selectedRecipeId }"
           :disabled="isViewer || !selectedRecipeId"
+          :title="t('tipApplyRecipe')"
           @click="applyRecipe"
         >
           <span class="apply-dot"></span>
@@ -61,10 +90,16 @@
     </div>
 
     <div class="right-bar">
-      <div class="lang-switcher">
+<div class="lang-switcher">
         <button :class="{ active: lang === 'zh' }" @click="setLang('zh')">简体</button>
         <button :class="{ active: lang === 'en' }" @click="setLang('en')">EN</button>
       </div>
+      <button class="reload-btn" @click="() => window.location.reload()" title="Reset dashboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+      </button>
       <div class="robot-status-badge" :class="robotStatus">
         <span class="robot-status-dot"></span>
         <span>{{ t('robotStatus_' + robotStatus) }}</span>
@@ -72,6 +107,17 @@
       <div class="status-box" :class="{ connected: isConnected, disconnected: !isConnected }">
         <div class="status-dot" :class="{ connected: isConnected, disconnected: !isConnected }"></div>
         <span>{{ isConnected ? t('connected') : t('disconnected') }}</span>
+      </div>
+
+      <div class="help-btn-wrap" v-click-outside="() => showHelp = false">
+        <button class="help-btn" @click="showHelp = !showHelp" :title="lang === 'zh' ? '使用说明' : 'How to use'">?</button>
+        <div class="help-panel" v-if="showHelp">
+          <div class="help-title">{{ lang === 'zh' ? '操作步骤' : 'How to use' }}</div>
+          <div class="help-step" v-for="(step, i) in helpSteps" :key="i">
+            <span class="help-num">{{ i + 1 }}</span>
+            <span class="help-text" v-html="step"></span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -107,7 +153,7 @@
 
             <!-- TOGGLE -->
             <div class="toggle">
-              <label class="switch">
+              <label class="switch" :title="t('tipSelectMode')">
                 <input type="checkbox" v-model="selectMode">
                 <span class="slider"></span>
               </label>
@@ -122,7 +168,7 @@
               <div class="gripper-info">
                 <span class="gripper-label">{{ t('gripper') }}</span>
                 <span class="gripper-state">{{ gripperOpen ? t('gripperOpen') : t('gripperClosed') }}</span>
-                <span v-if="countdown > 0" class="gripper-countdown">{{ countdown }}s</span>
+                <span v-if="waitingReturn" class="gripper-countdown">{{ t('atStation') }}</span>
               </div>
             </div>
 
@@ -149,11 +195,11 @@
                     :key="'tray1-'+n"
                     class="tray-cell"
                     :class="cellClass('tray1', n)"
+                    :title="cellTitle('tray1', n)"
                     @click="!isViewer && toggleCell('tray1',n)"
                   >
-                    <span v-if="orders.tray1[n]" class="order-number">
-                      {{ orders.tray1[n] }}
-                    </span>
+                    <span class="cell-num">{{ n }}</span>
+                    <span v-if="orders.tray1[n]" class="order-number">{{ orders.tray1[n] }}</span>
                   </div>
                 </div>
               </div>
@@ -172,11 +218,11 @@
                     :key="'tray4-'+n"
                     class="tray-cell"
                     :class="cellClass('tray4', n)"
+                    :title="cellTitle('tray4', n)"
                     @click="!isViewer && toggleCell('tray4',n)"
                   >
-                    <span v-if="orders.tray4[n]" class="order-number">
-                      {{ orders.tray4[n] }}
-                    </span>
+                    <span class="cell-num">{{ n }}</span>
+                    <span v-if="orders.tray4[n]" class="order-number">{{ orders.tray4[n] }}</span>
                   </div>
                 </div>
               </div>
@@ -189,11 +235,11 @@
                     :key="'tray2-'+n"
                     class="tray-cell"
                     :class="cellClass('tray2', n)"
+                    :title="cellTitle('tray2', n)"
                     @click="!isViewer && toggleCell('tray2',n)"
                   >
-                    <span v-if="orders.tray2[n]" class="order-number">
-                      {{ orders.tray2[n] }}
-                    </span>
+                    <span class="cell-num">{{ n }}</span>
+                    <span v-if="orders.tray2[n]" class="order-number">{{ orders.tray2[n] }}</span>
                   </div>
                 </div>
               </div>
@@ -212,11 +258,11 @@
                     :key="'tray6-'+n"
                     class="tray-cell"
                     :class="cellClass('tray6', n)"
+                    :title="cellTitle('tray6', n)"
                     @click="!isViewer && toggleCell('tray6',n)"
                   >
-                    <span v-if="orders.tray6[n]" class="order-number">
-                      {{ orders.tray6[n] }}
-                    </span>
+                    <span class="cell-num">{{ n }}</span>
+                    <span v-if="orders.tray6[n]" class="order-number">{{ orders.tray6[n] }}</span>
                   </div>
                 </div>
               </div>
@@ -229,11 +275,11 @@
                     :key="'tray5-'+n"
                     class="tray-cell"
                     :class="cellClass('tray5', n)"
+                    :title="cellTitle('tray5', n)"
                     @click="!isViewer && toggleCell('tray5',n)"
                   >
-                    <span v-if="orders.tray5[n]" class="order-number">
-                      {{ orders.tray5[n] }}
-                    </span>
+                    <span class="cell-num">{{ n }}</span>
+                    <span v-if="orders.tray5[n]" class="order-number">{{ orders.tray5[n] }}</span>
                   </div>
                 </div>
               </div>
@@ -246,11 +292,11 @@
                     :key="'tray3-'+n"
                     class="tray-cell"
                     :class="cellClass('tray3', n)"
+                    :title="cellTitle('tray3', n)"
                     @click="!isViewer && toggleCell('tray3',n)"
                   >
-                    <span v-if="orders.tray3[n]" class="order-number">
-                      {{ orders.tray3[n] }}
-                    </span>
+                    <span class="cell-num">{{ n }}</span>
+                    <span v-if="orders.tray3[n]" class="order-number">{{ orders.tray3[n] }}</span>
                   </div>
                 </div>
               </div>
@@ -299,15 +345,25 @@
         <!-- CONTROL BUTTONS -->
         <div class="controls" v-if="!isViewer">
 
-          <button class="btn sample" @click="captureImage" :disabled="capturing">{{ t('capture') }}</button>
+          <button class="btn sample" @click="captureImage" :disabled="capturing" :title="t('tipCapture')">{{ t('capture') }}</button>
 
-          <button class="btn start" @click="startRun" :disabled="isRunning && !isPaused">
+          <button class="btn start" @click="startRun"
+            :disabled="isRunning || waitingReturn"
+            :title="isPaused ? t('tipResume') : t('tipStart')">
             {{ isPaused ? t('resume') : t('start') }}
           </button>
 
-          <button class="btn pause" @click="pauseRun" :disabled="!isRunning || isPaused">{{ t('pause') }}</button>
+          <button class="btn return" @click="returnRun"
+            :disabled="isRunning || !waitingReturn"
+            :title="t('tipReturn')">
+            {{ t('returnBtn') }}
+          </button>
 
-          <button class="btn stop" @click="stopRun">{{ t('stop') }}</button>
+          <button class="btn pause" @click="pauseRun" :disabled="!isRunning || isPaused || waitingReturn" :title="t('tipPause')">{{ t('pause') }}</button>
+
+          <button class="btn stop" @click="stopRun" :title="t('tipStop')">{{ t('stop') }}</button>
+
+          <button class="btn go-home" @click="goHome" :disabled="isRunning" :title="t('tipHome')">{{ t('homeBtn') }}</button>
 
         </div>
 
@@ -377,11 +433,28 @@ computed: {
   apiBase() { return `http://${window.location.hostname}:3000` },
   selectedRecipe() { return this.recipes.find(r => r.id === this.selectedRecipeId) || null },
   robotStatus() {
-    if (!this.isConnected)       return 'idle'
-    if (this.waitingInspection)  return 'waiting_inspection'
-    if (this.isPaused)           return 'paused'
-    if (this.isRunning)          return 'running'
+    if (!this.isConnected)    return 'idle'
+    if (this.waitingReturn)   return 'waiting_return'
+    if (this.isPaused)        return 'paused'
+    if (this.isRunning)       return 'running'
     return 'ready'
+  },
+  helpSteps() {
+    return this.lang === 'zh' ? [
+      '输入机械臂 <b>IP 地址</b>，点击 <b>连线</b>',
+      '在配方列表选一个配方，点击 <b>●</b> 套用',
+      '点击 <b>取样</b> 触发视觉扫描<br><small>或开启切换开关手动点选格位</small>',
+      '点击 <b>开始</b> 执行任务',
+      '执行中可点 <b>暂停</b> 或 <b>停止</b>',
+      '到达检测站时系统自动等待，<br><small>到时自动继续，或由外部呼叫 /continue</small>',
+    ] : [
+      'Enter the arm <b>IP address</b>, click <b>Connect</b>',
+      'Choose a recipe from the list, click <b>●</b> to apply',
+      'Click <b>Scan</b> to run vision detection<br><small>or toggle the switch to select cells manually</small>',
+      'Click <b>Start</b> to run the task',
+      'During run: use <b>Pause</b> or <b>Stop</b> as needed',
+      'At the inspection station the robot waits automatically,<br><small>auto-continues after timeout, or call /continue from outside</small>',
+    ]
   },
 },
 
@@ -402,6 +475,9 @@ data(){
     camTimer: null,
     selectedRecipeId: null,
     appliedRecipeId: null,
+    _lastPolledRecipeId: undefined,
+    recipeDropdownOpen: false,
+    hoveredRecipe: null,
     isConnecting: false,
     criticalError: null,
     robotWarning: null,
@@ -412,9 +488,11 @@ data(){
     capturedImages: [null],
     capturing: false,
     gripperOpen: true,
-    countdown: 0,
     isRunning: false,
     isPaused: false,
+    waitingReturn: false,
+    currentPointIndex: 0,
+    totalPoints: 0,
 
     occupiedCells: {
       tray1:[], tray2:[], tray3:[],
@@ -423,8 +501,17 @@ data(){
     visionObjects: [],
     visionRobotPoints: [],
     visionCalibrated: false,
-    waitingInspection: false,
+    showHelp: false,
   }
+},
+
+activated(){
+  this.$nextTick(() => this.drawCanvas())
+},
+
+beforeUnmount(){
+  clearInterval(this.posTimer)
+  clearInterval(this.camTimer)
 },
 
 mounted(){
@@ -441,25 +528,6 @@ mounted(){
         if(!this._serverStart) this._serverStart = data.serverStart
         else if(this._serverStart !== data.serverStart) { window.location.reload(); return }
       }
-      if(data.sessionId){
-        if(!this._sessionId) this._sessionId = data.sessionId
-        else if(this._sessionId !== data.sessionId) {
-          this._sessionId       = data.sessionId
-          this.capturedImages   = [null]
-          this.visionObjects    = []
-          this.occupiedCells    = { tray1:[], tray2:[], tray3:[], tray4:[], tray5:[], tray6:[] }
-          this.orders           = { tray1:{}, tray2:{}, tray3:{}, tray4:{}, tray5:{}, tray6:{} }
-          this.doneLabels       = []
-          this.runningLabel     = null
-          this.processingLabel  = null
-          this.visionRobotPoints = []
-          this._cachedImg       = null
-          if(this.$refs.camCanvas) {
-            const ctx = this.$refs.camCanvas.getContext('2d')
-            ctx.clearRect(0, 0, this.$refs.camCanvas.width, this.$refs.camCanvas.height)
-          }
-        }
-      }
       this.pos = data
       const wasConnected = this.isConnected
       this.isConnected = !!data.connected
@@ -469,16 +537,19 @@ mounted(){
       if(data.processingLabel   !== undefined) this.processingLabel   = data.processingLabel
       if(Array.isArray(data.doneLabels))       this.doneLabels        = data.doneLabels
       if(data.gripperOpen       !== undefined) this.gripperOpen       = data.gripperOpen
-      if(data.countdown         !== undefined) this.countdown         = data.countdown
       if(data.running           !== undefined) this.isRunning         = data.running
       if(data.paused            !== undefined) this.isPaused          = data.paused
-      if(data.waitingInspection !== undefined) this.waitingInspection = data.waitingInspection
+      if(data.waitingReturn     !== undefined) this.waitingReturn     = data.waitingReturn
+      if(data.currentPointIndex !== undefined) this.currentPointIndex = data.currentPointIndex
+      if(data.totalPoints       !== undefined) this.totalPoints       = data.totalPoints
       if(data.criticalError !== undefined) this.criticalError = data.criticalError
       if(data.robotWarning  !== undefined) this.robotWarning  = data.robotWarning
-      if(data.currentRecipeId   !== undefined) {
-        this.appliedRecipeId  = data.currentRecipeId
-        if(data.currentRecipeId && this.selectedRecipeId !== data.currentRecipeId)
-          this.selectedRecipeId = data.currentRecipeId
+      if(data.currentRecipeId !== undefined) {
+        if(data.currentRecipeId !== this._lastPolledRecipeId) {
+          this.selectedRecipeId    = data.currentRecipeId
+          this._lastPolledRecipeId = data.currentRecipeId
+        }
+        this.appliedRecipeId = data.currentRecipeId
       }
       if(data.running && Array.isArray(data.currentPoints)){
         const orders = { tray1:{}, tray2:{}, tray3:{}, tray4:{}, tray5:{}, tray6:{} }
@@ -497,6 +568,14 @@ mounted(){
         this.visionRobotPoints = vd.robotPoints || []
         this.visionCalibrated  = vd.calibrated  || false
         this.drawCanvas()
+      }
+
+      if(data.sessionId){
+        if(!this._sessionId) this._sessionId = data.sessionId
+        else if(this._sessionId !== data.sessionId) {
+          this._sessionId = data.sessionId
+          await this.clearDashboard()
+        }
       }
     } catch(e) {}
   }, 300)
@@ -526,7 +605,14 @@ methods:{
 
   t(key) { return useLangStore().t(key) },
 
-  setLang(l)     { useLangStore().setLang(l) },
+  setLang(l) { useLangStore().setLang(l) },
+  selectRecipeItem(id) {
+    this.selectedRecipeId  = id
+    this.appliedRecipeId   = null
+    this.recipeDropdownOpen = false
+    this.hoveredRecipe     = null
+  },
+  closeRecipeDropdown() { this.recipeDropdownOpen = false; this.hoveredRecipe = null },
   async applyRecipe() {
     if (!this.selectedRecipeId) return
     try {
@@ -586,7 +672,7 @@ methods:{
     this.isConnecting = true
 
     const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), 15000)
+    const timer = setTimeout(() => abort.abort(), 70000)
     let data
     try {
       const res = await fetch(`${this.apiBase}/robot/${action}`, {
@@ -623,6 +709,8 @@ methods:{
       this.logKey('logNeedConnect', [], "error")
       return
     }
+
+    await this.clearDashboard()
 
     this.capturing      = true
     this.visionObjects  = []
@@ -755,11 +843,6 @@ methods:{
       return
     }
 
-    this.capturedImages = [null]
-    this._cachedImg = null
-    const canvas = this.$refs.camCanvas
-    if(canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height)
-
     // Resume nếu đang tạm dừng
     if(this.isPaused){
       const res = await fetch(`${this.apiBase}/robot/resume`, { method: "POST" })
@@ -769,11 +852,15 @@ methods:{
       return
     }
 
-    // Build point list — ưu tiên cell chọn tay, fallback sang vision auto
-    const hasManualOrders = Object.values(this.orders).some(cells => Object.keys(cells).length > 0)
+    const isNewTask = this.totalPoints === 0 || this.currentPointIndex >= this.totalPoints
+    const speed = this.selectedRecipe?.speed || 40
+    let body = { speed }
 
-    let payload
-    if(hasManualOrders){
+    if (isNewTask) {
+      // Lần đầu: build và gửi points
+      const hasManualOrders = Object.values(this.orders).some(cells => Object.keys(cells).length > 0)
+      if(!hasManualOrders){ this.logKey('logNeedScan', [], "error"); return }
+
       const points = []
       for(const [tray, cells] of Object.entries(this.orders)){
         for(const [n, orderNum] of Object.entries(cells)){
@@ -782,33 +869,36 @@ methods:{
         }
       }
       points.sort((a, b) => a._order - b._order)
-      payload = points.map(({ _order, ...p }) => p)
-      this.logKey('logManual', [payload.length], "info")
-    } else if(this.visionCalibrated && this.visionRobotPoints.length > 0){
-      payload = this.visionRobotPoints
-      this.logKey('logVision', [payload.length], "info")
-    } else {
-      this.logKey('logNeedScan', [], "error")
-      return
+      const payload = points.map(({ _order, ...p }) => p)
+      this.logKey('logRunning', [payload.length], "info")
+      body.points = payload
     }
-
-    this.logKey('logRunning', [payload.length], "info")
-    this.doneLabels  = []
-    this.runningLabel = null
 
     const res = await fetch(`${this.apiBase}/robot/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        points: payload,
-        speed: this.selectedRecipe?.speed || 40,
-        inspect_wait: this.selectedRecipe?.inspect_wait || null,
-      })
+      body: JSON.stringify(body)
     })
 
     const data = await res.json()
+    if(!data.success) this.logKey('logRunFail', [data.error || ""], "error")
+  },
+
+  async goHome(){
+    if(!this.isConnected) return
+    await fetch(`${this.apiBase}/robot/home`, { method: 'POST' })
+  },
+
+  async returnRun(){
+    if(!this.isConnected) return
+    const res = await fetch(`${this.apiBase}/robot/return`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speed: this.selectedRecipe?.speed || 40 })
+    })
+    const data = await res.json()
     if(data.success){
-      this.logKey('logDone', [], "ok")
+      if(data.allDone) this.logKey('logDone', [], "ok")
     } else {
       this.logKey('logRunFail', [data.error || ""], "error")
     }
@@ -821,13 +911,36 @@ methods:{
     else this.logKey('logPauseFail', [data.error || ""], "error")
   },
 
-  async stopRun(){
-    await fetch(`${this.apiBase}/robot/stop`, { method: "POST" })
-    this.isPaused    = false
-    this.isRunning   = false
-    this.doneLabels  = []
+  async clearDashboard(){
+    this.orders          = { tray1:{}, tray2:{}, tray3:{}, tray4:{}, tray5:{}, tray6:{} }
+    this.currentOrder    = 1
+    this.doneLabels      = []
     this.runningLabel    = null
     this.processingLabel = null
+    this.visionObjects   = []
+    this.occupiedCells   = { tray1:[], tray2:[], tray3:[], tray4:[], tray5:[], tray6:[] }
+    this.capturedImages  = [null]
+    this._cachedImg      = null
+    this.visionRobotPoints = []
+    this.visionCalibrated  = false
+    const canvas = this.$refs.camCanvas
+    if(canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height)
+    await Promise.all([
+      fetch(`${this.apiBase}/camera/clear`,    { method: 'POST' }),
+      fetch(`${this.apiBase}/vision/reset`,    { method: 'POST' }),
+      fetch(`${this.apiBase}/robot/clear-run`, { method: 'POST' }),
+    ]).catch(() => {})
+  },
+
+  async stopRun(){
+    await fetch(`${this.apiBase}/robot/stop`, { method: "POST" })
+    this.isPaused          = false
+    this.isRunning         = false
+    this.doneLabels        = []
+    this.runningLabel      = null
+    this.processingLabel   = null
+    this.visionRobotPoints = []
+    this.visionCalibrated  = false
     this.logKey('logStopped', [], "error")
   },
 
@@ -869,6 +982,15 @@ methods:{
       return { occupied: true }
 
     return {}
+  },
+
+  cellTitle(tray, n){
+    const label = `${tray}-${n}`
+    if(this.doneLabels.includes(label))                       return this.t('tipCellDone')
+    if(this.processingLabel === label || this.runningLabel === label) return this.t('tipCellRunning')
+    if(this.orders[tray][n])                                  return this.t('tipCellSelected')
+    if((this.occupiedCells[tray] || []).includes(n))          return this.t('tipCellOccupied')
+    return this.t('tipCellEmpty')
   }
 
 }
@@ -882,7 +1004,51 @@ methods:{
 * { box-sizing: border-box; }
 
 .recipe-apply-row { display: flex; align-items: center; gap: 6px; }
-.recipe-apply-row select { flex: 1; }
+
+.recipe-dropdown { position: relative; flex: 1; min-width: 120px; }
+.recipe-dropdown-trigger {
+  width: 100%; height: 28px; padding: 0 8px;
+  border: 1px solid #d1d5db; border-radius: 4px;
+  background: #fff; font-size: 0.85rem; color: #111;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  cursor: pointer; transition: border-color 0.15s; white-space: nowrap;
+}
+.recipe-dropdown-trigger span { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+.recipe-dropdown-trigger:hover:not(:disabled) { border-color: #6b7280; }
+.recipe-dropdown-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+.recipe-dropdown.open .recipe-dropdown-trigger { border-color: #3b82f6; }
+
+.recipe-dropdown-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 200;
+  background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12); overflow: visible;
+}
+.recipe-dropdown-item {
+  position: relative; padding: 6px 10px; font-size: 0.85rem;
+  cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+  transition: background 0.1s;
+}
+.recipe-dropdown-item:hover { background: #f3f4f6; }
+.recipe-dropdown-item.selected { background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+.recipe-item-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #16a34a; flex-shrink: 0;
+}
+
+.recipe-tooltip {
+  position: absolute; left: calc(100% + 8px); top: 0;
+  min-width: 160px; background: #1e293b; color: #f1f5f9;
+  border-radius: 8px; padding: 8px 12px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  pointer-events: none; z-index: 300;
+  font-size: 0.78rem;
+}
+.recipe-tooltip-row {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.recipe-tooltip-row:last-child { border-bottom: none; }
+.recipe-tooltip-row span { color: #94a3b8; }
+.recipe-tooltip-row strong { color: #f1f5f9; font-weight: 600; }
 .apply-recipe-btn {
   width: 28px; height: 28px; border-radius: 50%;
   border: 2px solid #aaa; background: #fff;
@@ -947,6 +1113,56 @@ methods:{
 .right-bar {
   display: flex; align-items: center; gap: 10px; padding-right: 20px;
 }
+
+.reload-btn {
+  width: 30px; height: 30px; border-radius: 6px;
+  border: 1px solid #ddd; background: #f5f5f5;
+  color: #555; cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.reload-btn:hover { background: #e5e7eb; color: #111; }
+
+.help-btn-wrap {
+  position: relative;
+}
+.help-btn {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 2px solid #9ca3af; background: #f9fafb;
+  color: #4b5563; font-size: 15px; font-weight: 700;
+  cursor: pointer; line-height: 1; padding: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.help-btn:hover { background: #e5e7eb; border-color: #6b7280; }
+
+.help-panel {
+  position: absolute; top: calc(100% + 8px); right: 0;
+  width: 270px; background: #fff;
+  border: 1px solid #e5e7eb; border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.13);
+  padding: 14px 16px; z-index: 999;
+}
+.help-title {
+  font-size: 13px; font-weight: 700; color: #1e3a5f;
+  margin-bottom: 10px; letter-spacing: 0.3px;
+}
+.help-step {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-bottom: 9px;
+}
+.help-step:last-child { margin-bottom: 0; }
+.help-num {
+  flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
+  background: #1e40af; color: #fff;
+  font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  margin-top: 1px;
+}
+.help-text {
+  font-size: 12.5px; color: #374151; line-height: 1.55;
+}
+.help-text b { color: #1e3a5f; }
+.help-text small { color: #6b7280; font-size: 11px; }
 .lang-switcher {
   display: flex; border: 1px solid #ddd; border-radius: 6px; overflow: hidden;
 }
@@ -978,7 +1194,7 @@ methods:{
  max-height:56px;
  padding:0;
  box-sizing:border-box;
- overflow:hidden;
+ overflow:visible;
 }
 
 .left{
@@ -1429,6 +1645,20 @@ input:checked + .slider:before{
  border-color:#2980b9;
 }
 
+.cell-num {
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  font-size: 8px;
+  color: rgba(0,0,0,0.35);
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+.tray-cell.active .cell-num,
+.tray-cell.done .cell-num { display: none; }
+.tray-cell.occupied .cell-num { color: rgba(255,255,255,0.6); }
+
 .order-number{
  position:absolute;
  top:50%;
@@ -1537,6 +1767,10 @@ input:checked + .slider:before{
  background:#2fa14f;
 }
 
+.return {
+ background:#1e6bd6;
+}
+
 .pause{
  background:#c28b00;
 }
@@ -1544,6 +1778,11 @@ input:checked + .slider:before{
 .stop{
  background:#d61e2c;
 }
+
+.go-home{
+ background:#6b7280;
+}
+
 .tray-cell.occupied{
   background:#555;
   border-color:#333;

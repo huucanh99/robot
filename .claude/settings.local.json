@@ -18,7 +18,8 @@
       "Bash(grep *)",
       "Bash(node -e \"require\\('dotenv'\\)\")",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(Remove-Item *)"
     ]
   }
 }

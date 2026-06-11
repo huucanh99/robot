@@ -65,27 +65,27 @@ function saveTagCounter() {
   try { fs.writeFileSync(TAG_COUNTER_FILE, String(tagCounter)) } catch (_) {}
 }
 let tagCounter = loadTagCounter()
-let gripperOpen          = true
-let inspectCountdown     = 0
-let robotPaused          = false
-let waitingInspection    = false
-let currentPoints        = []
-let currentRecipeId      = null
-let lastCapturedImage    = null
-let continueResolve      = null
-let integrationRecipe    = null
-let sessionId            = Date.now()
+let gripperOpen        = true
+let robotPaused        = false
+let waitingReturn      = false
+let currentPoints      = []
+let currentPointIndex  = 0
+let lastPickedPoint    = null
+let currentRecipeId    = null
+let lastCapturedImage  = null
+let integrationRecipe  = null
+let sessionId          = Date.now()
 
 function resetSession() {
   gripperOpen       = true
-  inspectCountdown  = 0
   robotPaused       = false
-  waitingInspection = false
+  waitingReturn     = false
   currentPoints     = []
+  currentPointIndex = 0
+  lastPickedPoint   = null
   lastCapturedImage = null
   tagCounter        = 100
   saveTagCounter()
-  if (continueResolve) { continueResolve(false); continueResolve = null }
   tmClient.running          = false
   tmMonitor.currentLabel    = null
   tmMonitor.processingLabel = null
@@ -97,13 +97,12 @@ function resetSession() {
 
 const ORI            = { rx: 180, ry: 0, rz: 84 }           // orientation cố định toàn bộ
 const POS_SAFE       = { label: "safe",    x: 585, y: 100,  z: 250, ...ORI }
+const POS_HOME       = { label: "home",    x: 500, y: 0, z: 400, ...ORI }
 const POS_INSPECT    = { label: "inspect", x: 585, y: -300, z: 200, ...ORI }
 
 const TRAY_PICK_Z    = 0     // ← z khi gripper chạm vật
 const TRAY_HOVER_Z   = 80    // ← z hover khi di chuyển (đủ cao tránh va chạm)
 const LOWER_MM       = TRAY_HOVER_Z - TRAY_PICK_Z   // tự tính = 100
-
-const INSPECT_TIMEOUT_MS = parseInt(process.env.INSPECT_TIMEOUT_MS) || 600000
 
 // ─── Vision TCP server (nhận SendString từ TMflow) ───────────────────────────
 // Dữ liệu mong muốn từ robot:
@@ -221,7 +220,7 @@ const visionServer = net.createServer(socket => {
           console.log("[Vision][TEXT]", obj)
           scheduleDone()
         } else {
-          console.warn("[Vision] parse error:", s)
+          console.log("[Vision] unknown line:", JSON.stringify(s))
         }
       }
     }
@@ -246,50 +245,49 @@ visionServer.listen(8765, () => console.log("[Vision] TCP server listening on po
 
 
 // ─── Robot endpoints ──────────────────────────────────────────────────────────
-let _clientReconnecting = false
-setInterval(async () => {
-  if (!tmMonitor.connected && !tmClient.running && tmClient.ip) {
-    autoConnectMonitor(tmClient.ip)
+let _manualConnecting  = false   // manual /robot/connect call in progress
+
+setInterval(() => {
+  if (!tmClient.connected && waitingReturn) {
+    console.log("[Safety] Socket lost while waiting return — clearing state")
+    waitingReturn   = false
+    lastPickedPoint = null
   }
-  if (!tmClient.connected && !tmClient.running && tmClient.ip && !_clientReconnecting) {
-    _clientReconnecting = true
-    console.log("[Client] Disconnected — waiting for Listen Node...")
-    try {
-      await tmClient.connect()
-      await tmClient.waitForListenNode()
-      resetSession()
-      console.log("[Client] Auto-reconnected ✓")
-    } catch(e) {
-      console.log("[Client] Reconnect failed, will retry:", e.message)
-    } finally {
-      _clientReconnecting = false
-    }
-  }
-}, 5000)
+}, 2000)
+
 app.post("/robot/connect", async (req, res) => {
   const { ip = "127.0.0.1" } = req.body
 
-  // Luôn connect TMRTS monitor trước, độc lập với Listen Node
-  if (!tmMonitor.connected && !tmClient.running) {
-    autoConnectMonitor(ip)
+  if (_manualConnecting) return res.status(400).json({ error: "Already connecting" })
+
+  _manualConnecting = true
+  tmClient.ip = ip
+
+  // Reset sạch mọi trạng thái cũ — coi như task mới hoàn toàn
+  tmClient.disconnect()
+  resetSession()
+
+  const deadline = Date.now() + 60000
+  let lastErr = "Connect timeout"
+
+  while (Date.now() < deadline) {
+    try {
+      await tmClient.connect()
+      await tmClient.waitForListenNode(10000)
+      resetSession()
+      sendWebhook("arm_ready")
+      _manualConnecting = false
+      return res.json({ success: true })
+    } catch (e) {
+      lastErr = e.message
+      tmClient.disconnect()
+      console.log("[Connect] Retry:", e.message)
+      await new Promise(r => setTimeout(r, 2000))
+    }
   }
 
-  if (tmClient.connected) return res.json({ success: true })
-  if (_clientReconnecting) return res.status(400).json({ error: "Already connecting" })
-
-  _clientReconnecting = true
-  try {
-    tmClient.ip = ip
-    await tmClient.connect()
-    await tmClient.waitForListenNode()
-    sendWebhook("arm_ready")
-    res.json({ success: true })
-  } catch (e) {
-    tmClient.disconnect()
-    res.status(500).json({ error: e.message })
-  } finally {
-    _clientReconnecting = false
-  }
+  _manualConnecting = false
+  res.status(500).json({ error: lastErr })
 })
 
 // Kết nối chỉ TMRTS monitor (không cần Listen Node)
@@ -322,10 +320,11 @@ app.get("/robot/position", (req, res) => {
     processingLabel: tmMonitor.processingLabel,
     doneLabels: tmMonitor.doneLabels,
     gripperOpen,
-    countdown: inspectCountdown,
     running: tmClient.running,
     paused: robotPaused,
-    waitingInspection,
+    waitingReturn,
+    currentPointIndex,
+    totalPoints: currentPoints.length,
     currentPoints,
     serverStart: SERVER_START_TIME,
     currentRecipeId,
@@ -401,119 +400,114 @@ async function sendWebhook(event, cell = null, message = null) {
   }
 }
 
-async function waitForContinue(timeoutMs = INSPECT_TIMEOUT_MS) {
-  waitingInspection = true
-  inspectCountdown  = Math.ceil(timeoutMs / 1000)
-  const timeoutId   = setTimeout(() => {
-    if (continueResolve) {
-      continueResolve(true)
-      continueResolve = null
-    }
-  }, timeoutMs)
-
-  const warnDelay = timeoutMs - 120000
-  const warnId = warnDelay > 0 ? setTimeout(() => {
-    sendWebhook("inspection_timeout_warning")
-  }, warnDelay) : null
-
-  const timerInterval = setInterval(() => {
-    if (!robotPaused && inspectCountdown > 0) inspectCountdown--
-  }, 1000)
-
-  const signalled = await new Promise(resolve => {
-    continueResolve = resolve
-  })
-
-  clearTimeout(timeoutId)
-  if (warnId) clearTimeout(warnId)
-  clearInterval(timerInterval)
-  waitingInspection = false
-  continueResolve   = null
-  inspectCountdown  = 0
-  return signalled && tmClient.running
-}
 app.post("/robot/run", async (req, res) => {
-  const { points, speed = 30, inspect_wait } = req.body
-  const inspectWaitMs = inspect_wait > 0 ? inspect_wait * 1000 : INSPECT_TIMEOUT_MS
+  const { points, speed = 30 } = req.body
 
   if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
-  if (tmClient.running) return res.status(400).json({ error: "Already running" })
-  if (!points || points.length === 0) return res.status(400).json({ error: "No points selected" })
+  if (tmClient.running)    return res.status(400).json({ error: "Already running" })
+  if (waitingReturn)       return res.status(400).json({ error: "Item at station — press Return first" })
 
-  saveTagCounter()  // persist before run so restart starts from fresh tags
+  // Nếu có points mới → reset queue
+  if (points && points.length > 0) {
+    currentPoints     = points
+    currentPointIndex = 0
+    tmMonitor.doneLabels = []
+    gripperOpen = true
+  }
+
+  if (currentPointIndex >= currentPoints.length)
+    return res.status(400).json({ error: "No more points to process" })
+
+  const pt = currentPoints[currentPointIndex]
+
+  saveTagCounter()
   if (tagCounter > 30000) tagCounter = 100
-  tmClient.running = true
-  robotPaused = false
+  tmClient.running          = true
+  tmMonitor.processingLabel = pt.label
+
+  try {
+    const ok = await runPickAndDeliver(pt, speed)
+    if (!ok) {
+      tmClient.running = false
+      return res.status(500).json({ error: `Pick failed at ${pt.label}` })
+    }
+
+    lastPickedPoint   = pt
+    waitingReturn     = true
+    currentPointIndex++
+    tmClient.running          = false
+    tmMonitor.processingLabel = pt.label   // giữ highlight xanh khi chờ return
+    sendWebhook("inspection_start", pt.label).catch(() => {})
+    res.json({ success: true, remaining: currentPoints.length - currentPointIndex })
+  } catch (e) {
+    tmClient.running = false
+    tmMonitor.processingLabel = null
+    sendWebhook("error", null, e.message)
+    try { if (tmClient.connected) await tmClient.sendScript("abort", ["StopAndClearBuffer(0)"]) } catch (_) {}
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post("/robot/return", async (req, res) => {
+  if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
+  if (tmClient.running)    return res.status(400).json({ error: "Already running" })
+  if (!waitingReturn || !lastPickedPoint) return res.status(400).json({ error: "Nothing to return" })
+
+  const { speed = 30 } = req.body || {}
+  const pt = lastPickedPoint
+
+  tmClient.running          = true
+  tmMonitor.processingLabel = pt.label
+
+  try {
+    const ok = await runReturnToTray(pt, speed)
+    if (!ok) {
+      tmClient.running = false
+      return res.status(500).json({ error: `Return failed for ${pt.label}` })
+    }
+
+    tmMonitor.doneLabels.push(pt.label)
+    waitingReturn   = false
+    lastPickedPoint = null
+
+    // Còn cell tiếp theo → tự chạy luôn
+    if (currentPointIndex < currentPoints.length) {
+      const next = currentPoints[currentPointIndex]
+      tmMonitor.processingLabel = next.label
+      const ok2 = await runPickAndDeliver(next, speed)
+      if (!ok2) {
+        tmClient.running = false
+        tmMonitor.processingLabel = null
+        return res.status(500).json({ error: `Pick failed at ${next.label}` })
+      }
+      lastPickedPoint   = next
+      waitingReturn     = true
+      currentPointIndex++
+      tmClient.running          = false
+      tmMonitor.processingLabel = next.label   // giữ highlight xanh
+      sendWebhook("inspection_start", next.label).catch(() => {})
+      return res.json({ success: true, allDone: false })
+    }
+
+    tmClient.running          = false
+    tmMonitor.processingLabel = null
+    sendWebhook("sequence_complete")
+    res.json({ success: true, allDone: true })
+  } catch (e) {
+    tmClient.running = false
+    tmMonitor.processingLabel = null
+    sendWebhook("error", null, e.message)
+    try { if (tmClient.connected) await tmClient.sendScript("abort", ["StopAndClearBuffer(0)"]) } catch (_) {}
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post("/robot/clear-run", (req, res) => {
   tmMonitor.currentLabel    = null
   tmMonitor.processingLabel = null
   tmMonitor.doneLabels      = []
-  gripperOpen = true
-  currentPoints = points
-  lastCapturedImage = null
-  inspectCountdown = 0
-
-  const lower = pt => ({ ...pt, z: pt.z - LOWER_MM, label: pt.label + '-down' })
-
-  async function pickFrom(pt) {
-    if (!await movePt(pt, speed))         return false  // đến trên vật
-    if (!await movePt(lower(pt), speed))  return false  // hạ xuống
-    gripperOpen = false                                  // gắp
-    if (!await movePt(pt, speed))         return false  // nâng lên
-    return true
-  }
-
-  async function placeTo(pt) {
-    if (!await movePt(pt, speed))         return false  // đến trên điểm đặt
-    if (!await movePt(lower(pt), speed))  return false  // hạ xuống
-    gripperOpen = true                                   // thả
-    if (!await movePt(pt, speed))         return false  // nâng lên
-    return true
-  }
-
-  try {
-for (const pt of points) {
-  if (!tmClient.running) break
-  await waitIfPaused()
-  if (!tmClient.running) break
-
-  tmMonitor.processingLabel = pt.label
-
-  const ok = await runPointBatch(pt, speed, pt.label, inspectWaitMs)
-  if (!ok) {
-    tmClient.running = false
-    return res.status(500).json({ error: `Point ${pt.label} failed` })
-  }
-
-  tmMonitor.doneLabels.push(pt.label)
-  tmMonitor.processingLabel = null
-
-  await new Promise(r => setTimeout(r, 50))
-}
-
-    gripperOpen = true
-    inspectCountdown = 0
-
-    // Trả về vị trí an toàn sau khi xong tất cả point
-    if (tmClient.running) {
-      const tSafe = ++tagCounter
-      const safePos = `${POS_SAFE.x},${POS_SAFE.y},${POS_SAFE.z},${POS_SAFE.rx},${POS_SAFE.ry},${POS_SAFE.rz}`
-      await tmClient.sendScript(`safe${tSafe}`, tagWrap([
-        `PTP("CPP",{${safePos}},${speed},0,0,false)`,
-      ]))
-      await waitTag(`safe${tSafe}`)
-    }
-
-    tmClient.running = false
-    sendWebhook("sequence_complete")
-    res.json({ success: true })
-  } catch (e) {
-    tmClient.running = false
-    sendWebhook("error", null, e.message)
-    try {
-      if (tmClient.connected) await tmClient.sendScript("abort", ["StopAndClearBuffer(0)"])
-    } catch (_) {}
-    res.status(500).json({ error: e.message })
-  }
+  currentPoints             = []
+  res.json({ ok: true })
 })
 
 app.post("/robot/pause", (req, res) => {
@@ -528,9 +522,12 @@ app.post("/robot/resume", (req, res) => {
 })
 
 app.post("/robot/stop", async (req, res) => {
-  tmClient.running = false
-  robotPaused = false
-  if (continueResolve) { continueResolve(false); continueResolve = null }
+  tmClient.running  = false
+  robotPaused       = false
+  waitingReturn     = false
+  lastPickedPoint   = null
+  currentPointIndex = 0
+  currentPoints     = []
 
   try {
     if (tmClient.connected) {
@@ -542,15 +539,30 @@ app.post("/robot/stop", async (req, res) => {
   }
 })
 
-app.post("/robot/continue", (req, res) => {
-  if (!waitingInspection || !continueResolve) {
-    return res.status(400).json({ error: "Not waiting for inspection" })
-  }
-  continueResolve(true)
-  continueResolve = null
-  res.json({ success: true })
-})
 
+app.post("/robot/home", async (req, res) => {
+  if (!tmClient.connected) return res.status(400).json({ error: "Robot not connected" })
+  if (tmClient.running)    return res.status(400).json({ error: "Already running" })
+
+  const { speed = 100 } = req.body || {}
+  tmClient.running = true
+  try {
+    const t = ++tagCounter
+    const homePos = `${POS_HOME.x},${POS_HOME.y},${POS_HOME.z},${POS_HOME.rx},${POS_HOME.ry},${POS_HOME.rz}`
+    const ok = await tmClient.sendScript(`home${t}`, tagWrap([
+      `PTP("CPP",{${homePos}},${speed},0,0,false)`
+    ]))
+    if (!ok || !await waitTag(`home${t}`)) {
+      tmClient.running = false
+      return res.status(500).json({ error: "Home move failed" })
+    }
+    tmClient.running = false
+    res.json({ success: true })
+  } catch (e) {
+    tmClient.running = false
+    res.status(500).json({ error: e.message })
+  }
+})
 
 // ─── Camera endpoints ─────────────────────────────────────────────────────────
 
@@ -594,6 +606,12 @@ app.get("/camera/latest", (req, res) => {
   res.json({ image: lastCapturedImage, ...lastCapturedImageMeta })
 })
 
+app.post("/camera/clear", (req, res) => {
+  lastCapturedImage    = null
+  lastCapturedImageMeta = { origWidth: 0, origHeight: 0 }
+  res.json({ ok: true })
+})
+
 let lastCapturedImageMeta = { origWidth: 0, origHeight: 0 }
 app.post("/camera/thumbnail", express.json({ limit: "5mb" }), (req, res) => {
   const { image, origWidth, origHeight } = req.body
@@ -602,6 +620,17 @@ app.post("/camera/thumbnail", express.json({ limit: "5mb" }), (req, res) => {
 })
 
 // ─── Vision endpoints ─────────────────────────────────────────────────────────
+
+app.post("/cells/resolve", (req, res) => {
+  const { cells } = req.body
+  if (!cells || !cells.length) return res.status(400).json({ error: "cells required" })
+  const resolved = cells.map(({ tray_id, cell }) => {
+    const coords = cellToRobot(tray_id, cell)
+    if (!coords) return null
+    return { tray_id, cell, x: coords.x, y: coords.y }
+  }).filter(Boolean)
+  res.json({ cells: resolved, calibrated: TRAY1_ROBOT_CALIBRATED })
+})
 
 app.post("/vision/reset", (req, res) => {
   resetVisionFrame()
@@ -663,6 +692,27 @@ function pixelToRobot(px, py) {
   if (!H_PIX_TO_ROBOT) return null
   const res = applyHomography(H_PIX_TO_ROBOT, px, py)
   return { x: +res.col.toFixed(2), y: +res.row.toFixed(2) }
+}
+
+// Cùng công thức & corner values với frontend getCellCoords — đảm bảo tọa độ y chang
+const TRAY1_CELL_CORNERS = {
+  tl: { x: 565, y: 272 },  // cell 1  (col=0, row=0)
+  tr: { x: 561, y: 153 },  // cell 4  (col=3, row=0)
+  bl: { x: 457, y: 274 },  // cell 17 (col=0, row=4)
+  br: { x: 447, y: 156 },  // cell 20 (col=3, row=4)
+}
+
+function cellToRobot(tray_id, cell) {
+  if (tray_id !== 1) return null
+  const col = (cell - 1) % 4
+  const row = Math.floor((cell - 1) / 4)
+  const s = col / 3
+  const t = row / 4
+  const { tl, tr, bl, br } = TRAY1_CELL_CORNERS
+  return {
+    x: +((1-s)*(1-t)*tl.x + s*(1-t)*tr.x + (1-s)*t*bl.x + s*t*br.x).toFixed(2),
+    y: +((1-s)*(1-t)*tl.y + s*(1-t)*tr.y + (1-s)*t*bl.y + s*t*br.y).toFixed(2),
+  }
 }
 
 function gaussSolve(A, b) {
@@ -734,12 +784,22 @@ app.get("/vision/latest", (req, res) => {
       }))
     : []
 
+  // Per-object: tray+cell+robot coords — dùng cho /integration/capture → /integration/run
+  const cells = H_PIX_TO_ROBOT ? objects.map(obj => {
+    const { col, row } = applyHomography(H_TRAY1, obj.x, obj.y)
+    const c = Math.round(col), r = Math.round(row)
+    if (c < 0 || c > 3 || r < 0 || r > 4) return null
+    const robot = pixelToRobot(obj.x, obj.y)
+    return { tray_id: 1, cell: r * 4 + c + 1, x: robot.x, y: robot.y }
+  }).filter(Boolean) : []
+
   res.json({
     found: objects.length > 0,
     done: latestVision.done,
     objects,
     occupied,
     robotPoints,
+    cells,
     calibrated: TRAY1_ROBOT_CALIBRATED,
   })
 })
@@ -903,13 +963,11 @@ app.delete("/recipes/:id", (req, res) => {
 
 initIntegration({
   tmClient, tmMonitor,
-  get gripperOpen()       { return gripperOpen },
-  get inspectCountdown()  { return inspectCountdown },
-  get robotPaused()       { return robotPaused },       set robotPaused(v)       { robotPaused = v },
-  get waitingInspection() { return waitingInspection },
-  get continueResolve()   { return continueResolve },   set continueResolve(v)   { continueResolve = v },
-  get integrationRecipe() { return integrationRecipe },  set integrationRecipe(v) { integrationRecipe = v },
-  get currentRecipeId()   { return currentRecipeId },   set currentRecipeId(v)   { currentRecipeId = v },
+  get gripperOpen()      { return gripperOpen },
+  get robotPaused()      { return robotPaused },      set robotPaused(v)      { robotPaused = v },
+  get waitingReturn()    { return waitingReturn },
+  get integrationRecipe(){ return integrationRecipe }, set integrationRecipe(v){ integrationRecipe = v },
+  get currentRecipeId()  { return currentRecipeId },  set currentRecipeId(v)  { currentRecipeId = v },
 }, db)
 app.use("/integration", integrationRouter)
 
@@ -932,62 +990,58 @@ function autoConnectMonitor(ip) {
     })
 }
 
-async function runPointBatch(rawPt, speed, currentCell = null, inspectWaitMs = INSPECT_TIMEOUT_MS) {
+function makeScriptHelpers(rawPt, speed) {
   const pt           = { ...rawPt, z: TRAY_HOVER_Z, ...ORI }
   const lowerPt      = { ...pt,    z: TRAY_PICK_Z }
   const lowerInspect = { ...POS_INSPECT, z: POS_INSPECT.z - LOWER_MM }
-
   function posStr(p) { return `${p.x},${p.y},${p.z},${p.rx},${p.ry},${p.rz}` }
   function ptp(p)    { return `PTP("CPP",{${posStr(p)}},${speed},0,0,false)` }
-  console.log(`[run] pick target: x=${pt.x} y=${pt.y} z=${pt.z} rx=${pt.rx} ry=${pt.ry} rz=${pt.rz}`)
+  return { pt, lowerPt, lowerInspect, ptp }
+}
 
-  // Mỗi script batch nhiều PTP liên tiếp (robot chạy thẳng không qua server)
-  // QueueTag chỉ đặt cuối mỗi script — tránh CPERR từ TM robot.
+// Pick từ tray → đặt ở trạm kiểm tra → về safe
+async function runPickAndDeliver(rawPt, speed) {
+  const { pt, lowerPt, lowerInspect, ptp } = makeScriptHelpers(rawPt, speed)
+  console.log(`[Deliver] pick: x=${pt.x} y=${pt.y} | inspect: x=${POS_INSPECT.x} y=${POS_INSPECT.y}`)
 
-  // Script 1: pick (approach → down → up) → gripper close
-  console.log(`[S1] pick → x=${pt.x} y=${pt.y} z=${pt.z}`)
+  // S1: pick (approach → down → up) → gripper close
   const t1 = ++tagCounter
   let ok = await tmClient.sendScript(`s${t1}`, tagWrap([ptp(pt), ptp(lowerPt), ptp(pt)]))
-  if (!ok) { console.log('[S1] FAILED sendScript'); return false }
-  if (!await waitTag(`s${t1}`)) { console.log('[S1] FAILED waitTag'); return false }
+  if (!ok || !await waitTag(`s${t1}`)) { console.log('[S1] FAILED'); return false }
   gripperOpen = false
   await waitIfPaused(); if (!tmClient.running) return false
 
-  // Script 2: place to inspect (to inspect → down → up) → gripper open
-  console.log(`[S2] inspect → x=${POS_INSPECT.x} y=${POS_INSPECT.y} z=${POS_INSPECT.z}`)
+  // S2: carry to inspect → lower → place → up → gripper open
   const t2 = ++tagCounter
   ok = await tmClient.sendScript(`s${t2}`, tagWrap([ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT)]))
-  if (!ok) { console.log('[S2] FAILED sendScript'); return false }
-  if (!await waitTag(`s${t2}`)) { console.log('[S2] FAILED waitTag'); return false }
+  if (!ok || !await waitTag(`s${t2}`)) { console.log('[S2] FAILED'); return false }
   gripperOpen = true
   await waitIfPaused(); if (!tmClient.running) return false
 
-  // Script 3: go to safe
-  console.log(`[S3] safe → x=${POS_SAFE.x} y=${POS_SAFE.y} z=${POS_SAFE.z}`)
+  // S3: go to safe position
   const t3 = ++tagCounter
   ok = await tmClient.sendScript(`s${t3}`, tagWrap([ptp(POS_SAFE)]))
-  if (!ok) { console.log('[S3] FAILED sendScript'); return false }
-  if (!await waitTag(`s${t3}`)) { console.log('[S3] FAILED waitTag'); return false }
-  await new Promise(r => setTimeout(r, 2000))
-  waitingInspection = true
+  if (!ok || !await waitTag(`s${t3}`)) { console.log('[S3] FAILED'); return false }
 
-  sendWebhook("inspection_start", currentCell).catch(() => {})
-  if (!await waitForContinue(inspectWaitMs)) return false
-  await waitIfPaused(); if (!tmClient.running) return false
+  return true
+}
 
-  // Script 4: pick lại từ inspect → gripper close
+// Pick từ trạm kiểm tra → trả về đúng ô tray
+async function runReturnToTray(rawPt, speed) {
+  const { pt, lowerPt, lowerInspect, ptp } = makeScriptHelpers(rawPt, speed)
+  console.log(`[Return] inspect: x=${POS_INSPECT.x} y=${POS_INSPECT.y} → tray: x=${pt.x} y=${pt.y}`)
+
+  // S4: pick from inspect → gripper close
   const t4 = ++tagCounter
-  ok = await tmClient.sendScript(`s${t4}`, tagWrap([ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT)]))
-  if (!ok) return false
-  if (!await waitTag(`s${t4}`)) return false
+  let ok = await tmClient.sendScript(`s${t4}`, tagWrap([ptp(POS_INSPECT), ptp(lowerInspect), ptp(POS_INSPECT)]))
+  if (!ok || !await waitTag(`s${t4}`)) { console.log('[S4] FAILED'); return false }
   gripperOpen = false
   await waitIfPaused(); if (!tmClient.running) return false
 
-  // Script 5: trả về pt (to pt → down → up) → gripper open
+  // S5: return to tray → lower → place → up → gripper open
   const t5 = ++tagCounter
   ok = await tmClient.sendScript(`s${t5}`, tagWrap([ptp(pt), ptp(lowerPt), ptp(pt)]))
-  if (!ok) return false
-  if (!await waitTag(`s${t5}`)) return false
+  if (!ok || !await waitTag(`s${t5}`)) { console.log('[S5] FAILED'); return false }
   gripperOpen = true
 
   return true
