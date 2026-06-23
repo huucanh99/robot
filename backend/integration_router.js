@@ -237,15 +237,6 @@ router.post("/stop", async (req, res) => {
   }
 })
 
-// ─── GET /integration/camera/latest ──────────────────────────────────────────
-router.get("/camera/latest", async (req, res) => {
-  try {
-    const data = await proxy("GET", "/camera/latest")
-    res.json(data)
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
 
 // ─── GET /integration/logs ────────────────────────────────────────────────────
 router.get("/logs", (req, res) => {

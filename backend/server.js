@@ -1,5 +1,3 @@
-process.stdout.setEncoding("utf8")
-process.stderr.setEncoding("utf8")
 require("dotenv").config()
 
 let criticalError = null
